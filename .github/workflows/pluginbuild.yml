@@ -117,8 +117,8 @@ jobs:
         fi
 
         if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-          gh release edit "$RELEASE_TAG" --prerelease
+          gh release edit "$RELEASE_TAG"
           gh release upload "$RELEASE_TAG" "$RELEASE_FILE" --clobber
         else
-          gh release create "$RELEASE_TAG" "$RELEASE_FILE" --prerelease --notes ""
+          gh release create "$RELEASE_TAG" "$RELEASE_FILE" --notes ""
         fi
