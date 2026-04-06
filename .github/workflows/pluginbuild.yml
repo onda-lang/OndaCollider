@@ -55,11 +55,15 @@ jobs:
     - name: Fetch Onda SDK (Unix)
       if: runner.os != 'Windows'
       shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
       run: bash ./scripts/fetch-onda.sh "$ONDA_SDK_PATH"
 
     - name: Fetch Onda SDK (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
       run: .\scripts\fetch-onda.ps1 -Destination $env:ONDA_SDK_PATH
 
     - name: Configure CMake

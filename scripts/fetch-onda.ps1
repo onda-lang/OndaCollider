@@ -23,6 +23,10 @@ $headers = @{
     Accept = "application/vnd.github+json"
     "X-GitHub-Api-Version" = "2022-11-28"
 }
+$apiToken = if ($env:GH_TOKEN) { $env:GH_TOKEN } elseif ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { $null }
+if ($apiToken) {
+    $headers.Authorization = "Bearer $apiToken"
+}
 
 Write-Host "[INFO] Resolving Onda release $releaseLabel"
 

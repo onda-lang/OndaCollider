@@ -35,20 +35,34 @@ API_HEADERS=(
     -H "Accept: application/vnd.github+json"
     -H "X-GitHub-Api-Version: 2022-11-28"
 )
+API_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+if [ -n "$API_TOKEN" ]; then
+    API_HEADERS+=(-H "Authorization: Bearer ${API_TOKEN}")
+fi
+
+fetch_release_json() {
+    local url="$1"
+    curl -fsSL "${API_HEADERS[@]}" "$url"
+}
 
 if [ -n "${ONDA_VERSION:-}" ]; then
     RELEASE_API_URL="${API_BASE_URL}/tags/${ONDA_VERSION}"
     echo "[INFO] Resolving Onda release ${ONDA_VERSION}"
-    RELEASE_JSON="$(curl -fsSL "${API_HEADERS[@]}" "$RELEASE_API_URL")"
+    RELEASE_JSON="$(fetch_release_json "$RELEASE_API_URL")"
 else
     echo "[INFO] Resolving latest Onda release"
-    if ! RELEASE_JSON="$(curl -fsSL "${API_HEADERS[@]}" "${API_BASE_URL}/latest")"; then
+    set +e
+    RELEASE_JSON="$(fetch_release_json "${API_BASE_URL}/latest")"
+    fetch_status=$?
+    set -e
+    if [ "$fetch_status" -ne 0 ]; then
         echo "[INFO] '/releases/latest' is unavailable; falling back to the releases list."
-        RELEASE_JSON="$(curl -fsSL "${API_HEADERS[@]}" "${API_BASE_URL}?per_page=20")"
+        RELEASE_JSON="$(fetch_release_json "${API_BASE_URL}?per_page=20")"
     fi
 fi
-RELEASE_TAG="$(printf '%s' "$RELEASE_JSON" | sed 's/,"/\n"/g' | sed -n 's/.*"tag_name":"\([^"]*\)".*/\1/p' | head -n1)"
-ARCHIVE_URL="$(printf '%s' "$RELEASE_JSON" | sed 's/,"/\n"/g' | sed -n 's/.*"browser_download_url":"\([^"]*\)".*/\1/p' | grep -E "/onda-[^/]*-${ASSET_SUFFIX}$" | head -n1)"
+
+RELEASE_TAG="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print((data[0] if isinstance(data,list) else data).get("tag_name",""))' <<<"$RELEASE_JSON")"
+ARCHIVE_URL="$(python3 -c 'import json,sys,re; data=json.load(sys.stdin); rel=(data[0] if isinstance(data,list) else data); suffix=sys.argv[1]; rx=re.compile(r"/onda-[^/]*-" + re.escape(suffix) + r"$"); print(next((a.get("browser_download_url","") for a in rel.get("assets",[]) if rx.search(a.get("browser_download_url",""))), ""))' "$ASSET_SUFFIX" <<<"$RELEASE_JSON")"
 
 if [ -z "$RELEASE_TAG" ]; then
     echo "[ERROR] Failed to resolve an Onda release from GitHub."
