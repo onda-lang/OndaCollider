@@ -1,6 +1,6 @@
 # OndaCollider
 
-SuperCollider plugin for running Onda code in `scsynth`/`supernova`.
+SuperCollider plugin for running the [onda](https://github.com/onda-lang/onda) JIT compiler in `scsynth`/`supernova`.
 
 Pre-built binaries are available in the Release page.
 
