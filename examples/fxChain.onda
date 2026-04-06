@@ -1,0 +1,33 @@
+import std/data
+
+params:
+  drive = 1.0
+  delayTime = 0.2
+  feedback = 0.5
+
+init:
+  data = std::data::Data()
+  dataLen = data.len()
+  writePos = 0
+
+block:
+  delaySamples = i32(delayTime * samplerate)
+  if (delaySamples < 1):
+    delaySamples = 1
+  if (delaySamples >= dataLen):
+    delaySamples = dataLen - 1
+  
+  sample:
+    readPos = writePos - delaySamples
+    if (readPos < 0):
+      readPos = readPos + dataLen
+
+    distorted = tanh(in1 * drive)
+    delayed = data.read(readPos)
+
+    data.write(writePos, distorted + delayed * feedback)
+    writePos = writePos + 1
+    if (writePos >= dataLen):
+      writePos = 0
+
+    out1 = delayed + distorted

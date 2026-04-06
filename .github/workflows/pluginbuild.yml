@@ -1,0 +1,120 @@
+name: Build Onda
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*.[0-9]*.[0-9]*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-latest
+          - name: linux-x86-64
+            os: ubuntu-22.04
+          - name: win-x86-64
+            os: windows-latest
+
+    env:
+      SC_PATH: ${{ github.workspace }}/supercollider
+      ONDA_SDK_PATH: ${{ github.workspace }}/onda-sdk
+      BUILD_PATH: ${{ github.workspace }}/build
+      INSTALL_PATH: ${{ github.workspace }}/build/Install
+      ARCHIVE_NAME: Onda-${{ matrix.name }}.zip
+
+    steps:
+    - name: Checkout OndaCollider
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Checkout SuperCollider
+      uses: actions/checkout@v4
+      with:
+        repository: supercollider/supercollider
+        path: supercollider
+        ref: develop
+        submodules: recursive
+
+    - name: Install Linux Deps
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libasound2-dev libsndfile1-dev libgtk-3-dev libwebkit2gtk-4.0-dev
+
+    - name: Fetch Onda SDK (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: bash ./scripts/fetch-onda.sh "$ONDA_SDK_PATH"
+
+    - name: Fetch Onda SDK (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: .\scripts\fetch-onda.ps1 -Destination $env:ONDA_SDK_PATH
+
+    - name: Configure CMake
+      shell: bash
+      run: >
+        cmake -S . -B "$BUILD_PATH"
+        -DCMAKE_BUILD_TYPE=Release
+        -DSC_PATH="$SC_PATH"
+        -DONDA_SDK_PATH="$ONDA_SDK_PATH"
+        -DCMAKE_INSTALL_PREFIX="$INSTALL_PATH"
+
+    - name: Build
+      shell: bash
+      env:
+        CMAKE_BUILD_PARALLEL_LEVEL: 4
+      run: cmake --build "$BUILD_PATH" --config Release
+
+    - name: Install
+      shell: bash
+      run: cmake --install "$BUILD_PATH" --config Release
+
+    - name: Zip up build (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      working-directory: ${{ env.INSTALL_PATH }}
+      run: zip -r "$ARCHIVE_NAME" "Onda"
+
+    - name: Zip up build (Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      working-directory: ${{ env.INSTALL_PATH }}
+      run: 7z a "$ARCHIVE_NAME" -tzip "Onda"
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ARCHIVE_NAME }}
+        path: ${{ env.INSTALL_PATH }}/${{ env.ARCHIVE_NAME }}
+
+    - name: Upload binaries to release
+      if: startsWith(github.ref, 'refs/tags/')
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ github.ref_name }}
+        RELEASE_FILE: ${{ env.INSTALL_PATH }}/${{ env.ARCHIVE_NAME }}
+      run: |
+        if [[ ! -f "$RELEASE_FILE" ]]; then
+          echo "release artifact not found: $RELEASE_FILE" >&2
+          exit 1
+        fi
+
+        if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          gh release edit "$RELEASE_TAG" --prerelease
+          gh release upload "$RELEASE_TAG" "$RELEASE_FILE" --clobber
+        else
+          gh release create "$RELEASE_TAG" "$RELEASE_FILE" --prerelease --notes ""
+        fi

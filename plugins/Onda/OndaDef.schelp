@@ -1,0 +1,93 @@
+TITLE:: OndaDef
+summary:: Onda definition manager
+categories:: UGens>Onda
+related:: Classes/Onda
+
+DESCRIPTION::
+OndaDef manages compile and lifetime commands for link::Classes/Onda:: programs running on the SuperCollider server.
+
+This first scaffold mirrors CmajorCollider workflow:
+
+code::
+OndaDef(\name, sourceOrPath).send;
+::
+
+Current host limits:
+
+list::
+## `ins`, `params`, and `events` must be scalar.
+## `ins` and `params` must use `f32` endpoint types.
+## `events` must use a single `f32` payload.
+## `outs` must use `f32` endpoint types (`f32` or `f32[N]`).
+## `buffers` must be `buffer[f32...]` and are driven from control-rate `bufnum` inputs.
+::
+
+CLASSMETHODS::
+
+METHOD:: new
+Create a new Onda definition.
+ARGUMENT:: key
+Unique link::Classes/Symbol:: for this definition.
+ARGUMENT:: sources
+Inline Onda source string, `.onda` file path string, or array mix of these.
+
+METHOD:: free
+Free a specific definition by key.
+
+METHOD:: freeAll
+Free all compiled OndaDefs and clear the global dictionary.
+
+INSTANCEMETHODS::
+
+METHOD:: send
+Asynchronously compile on the server.
+ARGUMENT:: server
+Target link::Classes/Server::. Defaults to `Server.default`.
+ARGUMENT:: action
+Optional function evaluated after successful compile.
+ARGUMENT:: numAllocate
+Reserved for parity with CmajorCollider API.
+
+METHOD:: add
+Alias for `send`.
+
+METHOD:: free
+Unload this definition on the server.
+
+METHOD:: query
+Post cached input/output metadata.
+
+METHOD:: ins
+Parsed input metadata array.
+
+METHOD:: outs
+Flattened output channel count.
+
+EXAMPLES::
+
+code::
+(
+s.waitForBoot {
+	var code = "
+params:
+  freq = 220 {20, 20000}
+
+init:
+  phase = 0.0
+
+block:
+  incr = freq / samplerate
+  sample:
+    out1 = sin(f32(twopi) * phase)
+    phase = (phase + incr) % 1.0
+";
+	
+    OndaDef(\sine, code).send;
+	
+	s.sync;
+	
+	{ Onda.ar(\sine, MouseX.kr(200, 1000, 1)).dup }.play;
+};
+)
+
+::

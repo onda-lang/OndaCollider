@@ -1,0 +1,36 @@
+params:
+  cutoff = 1000.0
+  q = 0.707107
+  mode = 0.0
+
+init:
+  z1 = 0.0
+  z2 = 0.0
+
+block:
+  c = clamp(cutoff, 0.0, samplerate * 0.48)
+  qv = q
+  if (qv < 0.01):
+    qv = 0.01
+
+  f = tan(pi * c / samplerate)
+  invQ = 1.0 / qv
+  d = 1.0 / (1.0 + invQ * f + f * f)
+  a = f
+  g1 = f + invQ
+  m = i32(mode)
+
+  sample:
+    high = (in1 - g1 * z1 - z2) * d
+    band = a * high + z1
+    low = a * band + z2
+
+    z1 = a * high + band
+    z2 = a * band + low
+
+    if m <= 0:
+      out1 = low
+    elif m == 1:
+      out1 = high
+    else:
+      out1 = band

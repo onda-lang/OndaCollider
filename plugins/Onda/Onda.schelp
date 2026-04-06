@@ -1,0 +1,433 @@
+TITLE:: Onda
+summary:: Onda UGen
+categories:: UGens>Plugins
+related:: Classes/OndaDef
+
+DESCRIPTION::
+Onda runs a compiled link::Classes/OndaDef::.
+
+This scaffold includes runtime processing via the Onda native API with hot-swap and metadata-driven input/output mapping.
+
+Current host limits:
+
+list::
+## Buffers are supported only for `buffer[f32...]`, mapped from control-rate `bufnum` inputs.
+## If a mapped buffer is invalid, Onda unbinds it and outputs silence for that block.
+## Buffer lock mode follows Onda `may_write` metadata (shared for read-only, exclusive for writable).
+## Inputs, params, and events must be scalar (no arrays).
+## Inputs and params must use `f32` endpoint types.
+## Events must use a single `f32` payload (one control argument per event endpoint).
+## Outputs must use `f32` endpoint types (`f32` or `f32[N]`).
+::
+
+CLASSMETHODS::
+
+METHOD:: ar
+Build an Onda UGen from a previously compiled OndaDef.
+
+ARGUMENT:: def
+Definition key (`Symbol`) or OndaDef object.
+
+ARGUMENT:: ... args
+Inputs can be passed as:
+
+list::
+## Event mapping:
+`Onda.ar(\myDef, (freq: 440, gain: 0.2))`
+## Positional mapping:
+`Onda.ar(\myDef, 440, 0.2)`
+::
+
+Input init defaults from compile metadata are applied on the sclang side.
+
+EXAMPLES::
+
+SUBSECTION:: Dual Oscillator
+code::
+(
+s.waitForBoot({
+    var code = "
+def add_phase(p, inc, upper = twopi):
+  next = p + inc
+  if (next >= upper):
+    next = next - upper
+  return next
+
+proc DualOsc<T>:
+  params<T>:
+    freq = 110.0
+    modDepth  = 1.5
+    detune = 1.0
+
+  outs<T> 2
+
+  init<T>:
+    phaseA = 0.0
+    phaseB = 0.0
+    lastA = 0.0
+    lastB = 0.0
+
+  sample 8:
+    incA = freq * twopi / samplerate
+    incB = (freq + detune) * twopi / samplerate
+
+    phaseA = add_phase(phaseA, incA)
+    phaseB = add_phase(phaseB, incB)
+
+    currentA = sin(phaseA + (lastB * modDepth))
+    currentB = sin(phaseB + (lastA * modDepth))
+
+    out1 = currentA
+    out2 = currentB
+
+    lastA = currentA
+    lastB = currentB
+
+params:
+  freq = 110.0
+  modDepth = 1.5
+  detune = 1.0
+
+init:
+  osc = DualOsc<f64>(freq = freq, modDepth = modDepth, detune = detune)
+
+block:
+  osc.freq = freq
+  osc.modDepth = modDepth
+  osc.detune = detune
+
+  sample:
+    osc()
+    out1 = f32(osc.out1)
+    out2 = f32(osc.out2)
+";
+
+    OndaDef(\dualOsc, code).send(s, {
+        x = {
+            var freq = MouseX.kr(20, 500, 1);
+            var depth = MouseY.kr(1, 5);
+            var detune = LFNoise1.kr(0.5).range(0, 12);
+            Onda.ar(\dualOsc, (freq: freq, modDepth: depth, detune: detune)) * 0.5
+        }.play;
+    });
+});
+)
+::
+
+SUBSECTION:: Effects Chain
+code::
+(
+s.waitForBoot({
+    var b;
+    var code = "
+import std/data
+
+params:
+  drive = 1.0
+  delayTime = 0.2
+  feedback = 0.5
+
+init:
+  data = std::data::Data()
+  dataLen = data.len()
+  writePos = 0
+
+block:
+  delaySamples = i32(delayTime * samplerate)
+  if (delaySamples < 1):
+    delaySamples = 1
+  if (delaySamples >= dataLen):
+    delaySamples = dataLen - 1
+
+  sample:
+    readPos = writePos - delaySamples
+    if (readPos < 0):
+      readPos = readPos + dataLen
+
+    distorted = tanh(in1 * drive)
+    delayed = data.read(readPos)
+
+    data.write(writePos, distorted + delayed * feedback)
+    writePos = writePos + 1
+    if (writePos >= dataLen):
+      writePos = 0
+
+    out1 = delayed + distorted
+";
+
+    b = Buffer.read(s, ExampleFiles.child);
+    s.sync;
+
+    OndaDef(\fxChain, code).send(s, {
+        x = {
+            var input = PlayBuf.ar(1, b, loop: 1);
+            var drive = MouseX.kr(1, 20);
+            var feedback = MouseY.kr(0, 0.9);
+
+            Onda.ar(\fxChain, (
+                in1: input,
+                drive: drive,
+                delayTime: 0.2,
+                feedback: feedback
+            )) ! 2
+        }.play;
+    });
+});
+)
+::
+
+SUBSECTION:: Lorenz
+code::
+(
+s.waitForBoot({
+    var code = "
+params:
+  rho = 28.0
+  sigma = 10.0
+  beta = 2.666
+  speed = 20.0
+
+init:
+  x = 0.1
+  y = 0.0
+  z = 0.0
+  dt = 0.001
+
+sample:
+  iterations: i32 = i32(speed)
+  if (iterations < 1):
+    iterations = 1
+  if (iterations > 200):
+    iterations = 200
+
+  for i in 0..iterations:
+    dx = sigma * (y - x)
+    dy = x * (rho - z) - y
+    dz = x * y - beta * z
+
+    x = x + dx * dt
+    y = y + dy * dt
+    z = z + dz * dt
+
+  out1 = x * 0.03
+  out2 = y * 0.03
+";
+
+    OndaDef(\lorenz, code).send(s, {
+        x = {
+            var rho = MouseX.kr(20, 40);
+            var speed = MouseY.kr(1, 100);
+            Onda.ar(\lorenz, (rho: rho, speed: speed)) * 0.7
+        }.play;
+    });
+});
+)
+::
+
+SUBSECTION:: State Variable Filter
+code::
+(
+s.waitForBoot({
+    var code = "
+params:
+  cutoff = 1000.0
+  q = 0.707107
+  mode = 0.0
+
+init:
+  z1 = 0.0
+  z2 = 0.0
+
+block:
+  c = clamp(cutoff, 0.0, samplerate * 0.48)
+  qv = q
+  if (qv < 0.01):
+    qv = 0.01
+
+  f = tan(pi * c / samplerate)
+  invQ = 1.0 / qv
+  d = 1.0 / (1.0 + invQ * f + f * f)
+  a = f
+  g1 = f + invQ
+  m = i32(mode)
+
+  sample:
+    high = (in1 - g1 * z1 - z2) * d
+    band = a * high + z1
+    low = a * band + z2
+
+    z1 = a * high + band
+    z2 = a * band + low
+
+    if m <= 0:
+      out1 = low
+    elif m == 1:
+      out1 = high
+    else:
+      out1 = band
+";
+
+    OndaDef(\svf, code).send(s, {
+        x = {
+            var input = WhiteNoise.ar(0.5);
+            var cutoff = MouseX.kr(100, 10000, 1);
+            var q = SinOsc.kr(0.5).range(0.05, 4.0);
+            var mode = MouseY.kr(0, 3);
+            Onda.ar(\svf, (
+                in1: input,
+                cutoff: cutoff,
+                q: q,
+                mode: mode
+            )) ! 2
+        }.play;
+    });
+});
+)
+::
+
+SUBSECTION:: Sync Granulator
+code::
+(
+s.waitForBoot({
+    var b;
+    var code = "
+buffers:
+  buf
+
+params:
+  rate = 1.0
+  pos = 0.5
+  grainSize = 0.1
+
+init:
+  start = 0.0
+  phase = 0.0
+  jphase = 0.0
+
+block:
+  bufLen = buf.len()
+  if (bufLen < 2):
+    bufLen = 2
+
+  safeGrain = grainSize
+  if (safeGrain < 0.001):
+    safeGrain = 0.001
+
+  sample:
+    if (phase >= safeGrain):
+      phase = 0.0
+      jphase = jphase + 0.73
+      jitter = sin(jphase) * 0.1
+      start = clamp((pos + jitter) * bufLen, 0.0, bufLen - 1.0)
+
+    readPos = start + (phase * samplerate * rate)
+
+    w = 0.5 * (1.0 - cos(twopi * phase / safeGrain))
+    out1 = buf.readL(readPos) * w
+
+    phase = phase + 1.0 / samplerate
+";
+
+    b = Buffer.read(s, ExampleFiles.child);
+    s.sync;
+
+    OndaDef(\syncGranulator, code).send(s, {
+        x = {
+            var pos = MouseX.kr(0, 1);
+            var rate = MouseY.kr(0.5, 5.0);
+            var grainSize = LFNoise1.kr(1).range(0.01, 0.3);
+
+            var sig = Onda.ar(\syncGranulator, (
+                buffer: b.bufnum,
+                pos: pos,
+                rate: rate,
+                grainSize: grainSize
+            ));
+
+            sig ! 2
+        }.play;
+    });
+});
+)
+::
+
+SUBSECTION:: Dual Sync Granulator
+code::
+(
+s.waitForBoot({
+    var b;
+    var code = "
+buffers:
+  buf
+
+params:
+  rate = 1.0
+  pos = 0.5
+  spread = 0.02
+  grainSize = 0.12
+
+init:
+  startA = 0.0; startB = 0.0
+  phaseA = 0.0; phaseB = 0.5
+  jphase = 0.0
+
+block:
+  bufLen = buf.len()
+  if (bufLen < 2):
+    bufLen = 2
+
+  safeGrain = grainSize
+  if (safeGrain < 0.001):
+    safeGrain = 0.001
+
+  sample:
+    if (phaseA >= safeGrain):
+      phaseA = 0.0
+      jphase = jphase + 0.61
+      jitterA = sin(jphase) * 0.1
+      startA = clamp((pos + jitterA) * bufLen, 0.0, bufLen - 1.0)
+
+    if (phaseB >= safeGrain):
+      phaseB = 0.0
+      jphase = jphase + 0.97
+      jitterB = sin(jphase) * 0.1
+      startB = clamp((pos + spread + jitterB) * bufLen, 0.0, bufLen - 1.0)
+
+    readPosA = startA + (phaseA * samplerate * rate)
+    readPosB = startB + (phaseB * samplerate * (rate * 0.97))
+
+    wa = 0.5 * (1.0 - cos(twopi * phaseA / safeGrain))
+    wb = 0.5 * (1.0 - cos(twopi * phaseB / safeGrain))
+
+    sa = buf.readL(readPosA) * wa
+    sb = buf.readL(readPosB) * wb
+    out1 = (sa + sb) * 0.6
+
+    phaseA = phaseA + 1.0 / samplerate
+    phaseB = phaseB + 1.0 / samplerate
+";
+
+    b = Buffer.read(s, ExampleFiles.child);
+    s.sync;
+
+    OndaDef(\syncGranulatorDual, code).send(s, {
+        x = {
+            var pos = MouseX.kr(0, 1);
+            var rate = MouseY.kr(0.5, 5.0);
+            var spread = LFNoise1.kr(0.25).range(0.0, 0.12);
+            var grainSize = LFNoise1.kr(1).range(0.01, 0.3);
+
+            var sig = Onda.ar(\syncGranulatorDual, (
+                buffer: b.bufnum,
+                pos: pos,
+                rate: rate,
+                spread: spread,
+                grainSize: grainSize
+            ));
+
+            sig ! 2
+        }.play;
+    });
+});
+)
+::

@@ -1,0 +1,30 @@
+params:
+  rho = 28.0
+  sigma = 10.0
+  beta = 2.666
+  speed = 20.0
+
+init:
+  x = 0.1
+  y = 0.0
+  z = 0.0
+  dt = 0.001
+
+sample:
+  iterations: i32 = i32(speed)
+  if (iterations < 1):
+    iterations = 1
+  if (iterations > 200):
+    iterations = 200
+
+  for i in 0..iterations:
+    dx = sigma * (y - x)
+    dy = x * (rho - z) - y
+    dz = x * y - beta * z
+
+    x = x + dx * dt
+    y = y + dy * dt
+    z = z + dz * dt
+
+  out1 = x * 0.03
+  out2 = y * 0.03
