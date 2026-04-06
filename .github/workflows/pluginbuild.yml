@@ -26,6 +26,7 @@ jobs:
             os: windows-latest
 
     env:
+      SC_REF: Version-3.14.1
       SC_PATH: ${{ github.workspace }}/supercollider
       ONDA_SDK_PATH: ${{ github.workspace }}/onda-sdk
       BUILD_PATH: ${{ github.workspace }}/build
@@ -43,7 +44,7 @@ jobs:
       with:
         repository: supercollider/supercollider
         path: supercollider
-        ref: develop
+        ref: ${{ env.SC_REF }}
         submodules: recursive
 
     - name: Install Linux Deps
