@@ -1,6 +1,6 @@
 # OndaCollider
 
-SuperCollider plugin scaffold for running Onda (`onda`) programs in `scsynth`/`supernova`.
+SuperCollider plugin to Onda (`onda`) code in `scsynth`/`supernova`.
 
 ## Build
 
