@@ -45,6 +45,7 @@ jobs:
         repository: supercollider/supercollider
         path: supercollider
         ref: ${{ env.SC_REF }}
+        fetch-depth: 0
         submodules: recursive
 
     - name: Install Linux Deps
