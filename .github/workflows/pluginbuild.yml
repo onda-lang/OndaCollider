@@ -35,12 +35,12 @@ jobs:
 
     steps:
     - name: Checkout OndaCollider
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         fetch-depth: 0
 
     - name: Checkout SuperCollider
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         repository: supercollider/supercollider
         path: supercollider
@@ -100,7 +100,7 @@ jobs:
       run: 7z a "$ARCHIVE_NAME" -tzip "Onda"
 
     - name: Upload build artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: ${{ env.ARCHIVE_NAME }}
         path: ${{ env.INSTALL_PATH }}/${{ env.ARCHIVE_NAME }}
@@ -119,7 +119,12 @@ jobs:
         fi
 
         if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-          gh release upload "$RELEASE_TAG" "$RELEASE_FILE" --clobber
+          if [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" == "true" ]]; then
+            gh release upload "$RELEASE_TAG" "$RELEASE_FILE" --clobber
+            gh release edit "$RELEASE_TAG" --draft=false
+          else
+            gh release upload "$RELEASE_TAG" "$RELEASE_FILE" --clobber
+          fi
         else
           gh release create "$RELEASE_TAG" "$RELEASE_FILE" --notes ""
         fi
