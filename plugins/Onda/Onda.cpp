@@ -376,8 +376,7 @@ void writeReply(std::string& reply, int hash, const CompiledProgram& compiled) {
 struct OndaCompileCmdData {
     int hash = 0;
     int numAllocate = 0;
-    int numPaths = 0;
-    char** paths = nullptr;
+    char* path = nullptr;
     char replyMsg[kMaxReplySize + 1] = {0};
     CompiledProgram* newProgram = nullptr;
     CompiledProgram* oldProgram = nullptr;
@@ -390,13 +389,8 @@ void ondaCompileCleanup(World* world, void* inUserData) {
         return;
     }
 
-    if (cmdData->paths) {
-        for (int i = 0; i < cmdData->numPaths; ++i) {
-            if (cmdData->paths[i]) {
-                RTFree(world, cmdData->paths[i]);
-            }
-        }
-        RTFree(world, cmdData->paths);
+    if (cmdData->path) {
+        RTFree(world, cmdData->path);
     }
 
     RTFree(world, cmdData);
@@ -458,32 +452,20 @@ bool ondaCompileStage2(World* world, void* inUserData) {
         return false;
     }
 
-    std::string combinedSource;
+    if (!cmdData->path) {
+        Print("ERROR: Onda: invalid cmd->path.\n");
+        return false;
+    }
 
-    for (int i = 0; i < cmdData->numPaths; ++i) {
-        const char* raw = cmdData->paths[i];
-        if (!raw) {
-            continue;
-        }
-
-        std::string sourceOrPath = raw;
-        std::error_code ec;
-        const bool isFile = std::filesystem::exists(sourceOrPath, ec)
-            && std::filesystem::is_regular_file(sourceOrPath, ec);
-
-        if (isFile) {
-            auto content = readFileContent(sourceOrPath);
-            if (!content.has_value()) {
-                Print("ERROR: Onda: failed to read source file '%s'.\n", sourceOrPath.c_str());
-                std::snprintf(cmdData->replyMsg, sizeof(cmdData->replyMsg), "_onda/%d/_fail", cmdData->hash);
-                return true;
-            }
-            combinedSource += content.value();
-            combinedSource += "\n";
-        } else {
-            combinedSource += sourceOrPath;
-            combinedSource += "\n";
-        }
+    std::string filePath = cmdData->path;
+    std::error_code ec;
+    
+    const bool isFile = std::filesystem::exists(filePath, ec)
+            && std::filesystem::is_regular_file(filePath, ec);
+    
+    if (!isFile) {
+        Print("ERROR: Onda: failed to read source file '%s'.\n", filePath.c_str());
+        return true;
     }
 
     onda_compile_options_t compileOptions{};
@@ -492,7 +474,8 @@ bool ondaCompileStage2(World* world, void* inUserData) {
     compileOptions.block_size = world->mBufLength;
 
     onda_diag_t diag{};
-    onda_program_t* program = onda_compile(combinedSource.c_str(), &compileOptions, &diag);
+    onda_program_t* program = onda_compile_file(filePath.c_str(), &compileOptions, &diag);
+
     if (!program) {
         const char* message = diag.message ? diag.message : "unknown compile error";
         Print("ERROR: Onda: compile failed (%d:%d): %s\n", diag.line, diag.column, message);
@@ -570,45 +553,23 @@ void ondaCompile(World* inWorld, void* /*inUserData*/, struct sc_msg_iter* args,
 
     cmdData->hash = args->geti();
     cmdData->numAllocate = args->geti();
-    cmdData->numPaths = args->geti();
+    
+    const char* path = args->gets();
 
-    if (cmdData->numPaths < 1) {
-        Print("ERROR: Onda: compile command requires at least one source.\n");
+    if (!path) {
+        return;
+    }
+
+    const size_t len = std::strlen(path);
+
+    cmdData->path = static_cast<char*>(RTAlloc(inWorld, len + 1));
+    if (!cmdData->path) {
+        Print("ERROR: Onda: failed to allocate path.\n");
         RTFree(inWorld, cmdData);
         return;
     }
 
-    cmdData->paths = static_cast<char**>(RTAlloc(inWorld, cmdData->numPaths * sizeof(char*)));
-    if (!cmdData->paths) {
-        Print("ERROR: Onda: failed to allocate path array.\n");
-        RTFree(inWorld, cmdData);
-        return;
-    }
-
-    for (int i = 0; i < cmdData->numPaths; ++i) {
-        cmdData->paths[i] = nullptr;
-
-        const char* path = args->gets();
-        if (!path) {
-            continue;
-        }
-
-        const size_t len = std::strlen(path);
-        cmdData->paths[i] = static_cast<char*>(RTAlloc(inWorld, len + 1));
-        if (!cmdData->paths[i]) {
-            Print("ERROR: Onda: failed to allocate source path string.\n");
-            for (int j = 0; j < i; ++j) {
-                if (cmdData->paths[j]) {
-                    RTFree(inWorld, cmdData->paths[j]);
-                }
-            }
-            RTFree(inWorld, cmdData->paths);
-            RTFree(inWorld, cmdData);
-            return;
-        }
-
-        std::memcpy(cmdData->paths[i], path, len + 1);
-    }
+    std::memcpy(cmdData->path, path, len + 1);
 
     DoAsynchronousCommand(
         inWorld,

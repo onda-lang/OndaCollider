@@ -4,8 +4,8 @@ OndaDef {
 	var <key;
 	var <hash;
 	var <numAllocate;
-	var <sources;
-	var <tmpFiles;
+	var <source;
+	var <tmpFile;
 
 	var <ins;
 	var <outs;
@@ -14,48 +14,36 @@ OndaDef {
 		all = IdentityDictionary.new;
 	}
 
-	*new { |key, sources|
-		^super.new.init(key, sources);
+	*new { |key, source|
+		^super.new.init(key, source);
 	}
 
-	init { |argKey, argSources|
+	init { |argKey, argSource|
 		var tmpFileCtr = 0;
+		var src, srcPath, isOndaPath;
+
 		key = argKey.asSymbol;
-
-		argSources = if(argSources.isString) {
-			[argSources]
-		} {
-			argSources.asArray
-		};
-
-		sources = [];
-		tmpFiles = [];
 
 		hash = (key.hash.abs & 0xFFFFFF).asInteger;
 
-		argSources.do { |src|
-			var srcPath, isOndaPath;
-			src = src.asString;
-			srcPath = PathName(src);
-			isOndaPath = srcPath.extension.contains("onda");
+		src = argSource.asString;
+		srcPath = PathName(src);
+		isOndaPath = srcPath.extension.contains("onda");
 
-			if(isOndaPath) {
-				var fullPath = srcPath.fullPath;
-				if(File.exists(fullPath)) {
-					sources = sources.add(fullPath);
-				} {
-					"Invalid path: '%'".format(fullPath).error;
-					^this;
-				}
+		if(isOndaPath) {
+			var fullPath = srcPath.fullPath;
+			if(File.exists(fullPath)) {
+				source = fullPath;
 			} {
-				var tmpFile = PathName.tmp ++ key.asString ++ tmpFileCtr.asString ++ ".onda";
-				File.use(tmpFile, "w", { |f|
-					f.write(src);
-				});
-				sources = sources.add(tmpFile);
-				tmpFiles = tmpFiles.add(tmpFile);
-				tmpFileCtr = tmpFileCtr + 1;
-			};
+				"Invalid path: '%'".format(fullPath).error;
+				^this;
+			}
+		} {
+			tmpFile = PathName.tmp ++ key.asString ++ tmpFileCtr.asString ++ ".onda";
+			File.use(tmpFile, "w", { |f|
+				f.write(src);
+			});
+			source = tmpFile;
 		};
 	}
 
@@ -140,15 +128,13 @@ OndaDef {
 			}, '/done', server.addr);
 
 			forkIfNeeded {
-				var msg = ["/cmd", "onda_compile", hash, numAllocate.asInteger, sources.size] ++ sources;
+				var msg = ["/cmd", "onda_compile", hash, numAllocate.asInteger, source];
 
 				server.sendMsg(*msg);
 				cond.hang;
 
-				tmpFiles.do({ |tmpFile|
-					if (File.delete(tmpFile).not, {
-						"OndaDef: Could not delete temp file %".format(tmpFile).warn;
-					});
+				if (File.delete(tmpFile).not, {
+					"OndaDef: Could not delete temp file %".format(tmpFile).warn;
 				});
 
 				oscFunc.free;

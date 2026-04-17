@@ -28,8 +28,8 @@ METHOD:: new
 Create a new Onda definition.
 ARGUMENT:: key
 Unique link::Classes/Symbol:: for this definition.
-ARGUMENT:: sources
-Inline Onda source string, `.onda` file path string, or array mix of these.
+ARGUMENT:: source
+Inline Onda source string, `.onda` file path string.
 
 METHOD:: free
 Free a specific definition by key.
@@ -70,7 +70,7 @@ code::
 s.waitForBoot {
 	var code = "
 params:
-  freq = 220 {20, 20000}
+  freq = 220.0 {20, 20000}
 
 init:
   phase = 0.0
