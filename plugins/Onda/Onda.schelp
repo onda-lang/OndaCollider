@@ -12,7 +12,7 @@ Current host limits:
 
 list::
 ## Buffers are supported only for `buffer[f32...]`, mapped from control-rate `bufnum` inputs.
-## If a mapped buffer is invalid, Onda unbinds it and outputs silence for that block.
+## Missing or incompatible mapped buffers are unbound from Onda, and the UGen outputs silence until every required buffer is valid and rebound.
 ## Buffer lock mode follows Onda `may_write` metadata (shared for read-only, exclusive for writable).
 ## Inputs, params, and events must be scalar (no arrays).
 ## Inputs and params must use `f32` endpoint types.
@@ -338,7 +338,7 @@ block:
             var grainSize = LFNoise1.kr(1).range(0.01, 0.3);
 
             var sig = Onda.ar(\syncGranulator, (
-                buffer: b.bufnum,
+                buf: b.bufnum,
                 pos: pos,
                 rate: rate,
                 grainSize: grainSize
@@ -418,7 +418,7 @@ block:
             var grainSize = LFNoise1.kr(1).range(0.01, 0.3);
 
             var sig = Onda.ar(\syncGranulatorDual, (
-                buffer: b.bufnum,
+                buf: b.bufnum,
                 pos: pos,
                 rate: rate,
                 spread: spread,

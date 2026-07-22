@@ -66,12 +66,6 @@ public:
     void setSilence();
 
 private:
-    enum class ProcessAudioResult : uint8_t {
-        Ok = 0,
-        SoftSilence = 1,
-        Fatal = 2,
-    };
-
     enum class BufferPrepResult : uint8_t {
         Ok = 0,
         Invalid = 1,
@@ -98,7 +92,11 @@ private:
     struct RuntimeBufferState {
         void* boundPtr = nullptr;
         int boundBufIndex = -1;
+        int boundFrames = -1;
+        int boundChannels = -1;
+        float boundSampleRate = 0.0f;
         bool bound = false;
+        bool invalidReported = false;
     };
 
 #if SUPERNOVA
@@ -112,13 +110,13 @@ private:
     bool bindLatestProgram(bool isHotSwap);
     bool claimInstance(CompiledProgram* program, onda_instance_t*& outInstance, int& outIndex);
     void releaseInstance();
-    bool allocateRtState(CompiledProgram* program);
+    bool allocateRtState(CompiledProgram* program, int instanceSlot);
     void freeRtState();
-    ProcessAudioResult processAudio(int nSamples);
+    bool processAudio(int nSamples);
     BufferPrepResult prepareBuffers();
-    bool prepareInputs(int nSamples);
+    bool prepareInputs();
     bool prepareParamsAndEvents();
-    bool prepareOutputs(int nSamples);
+    bool prepareOutputs();
     void copyOutputsToSC(int nSamples);
     void silenceBlockOutputs(int nSamples);
     SndBuf* resolveSndBufByIndex(int bufIndex) const;

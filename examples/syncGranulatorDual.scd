@@ -15,7 +15,7 @@ s.waitForBoot({
             var grainSize = LFNoise1.kr(1).range(0.01, 0.3);
 
             var sig = Onda.ar(\syncGranulatorDual, (
-                buffer: b.bufnum,
+                buf: b.bufnum,
                 pos: pos,
                 rate: rate,
                 spread: spread,

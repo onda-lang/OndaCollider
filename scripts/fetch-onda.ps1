@@ -6,9 +6,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if ((Test-Path (Join-Path $Destination "include\\onda.h")) -and (Test-Path (Join-Path $Destination "lib"))) {
-    Write-Host "[INFO] Reusing existing Onda SDK at $Destination"
-    exit 0
+if (-not $Version) {
+    $pinnedVersionFile = Join-Path (Split-Path -Parent $PSScriptRoot) "ONDA_VERSION"
+    if (-not (Test-Path -LiteralPath $pinnedVersionFile)) {
+        throw "Onda version file not found at $pinnedVersionFile"
+    }
+    $Version = (Get-Content -Raw -LiteralPath $pinnedVersionFile).Trim()
+}
+
+if (-not $Version) {
+    throw "Onda version is empty. Set ONDA_VERSION, pass -Version, or update $pinnedVersionFile."
 }
 
 $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
@@ -16,9 +23,19 @@ if ($arch -ne [System.Runtime.InteropServices.Architecture]::X64) {
     throw "No official Onda SDK asset configured for Windows/$arch. Pass an extracted SDK path explicitly instead."
 }
 
+$installedVersionFile = Join-Path $Destination ".onda-version"
+$installedVersion = if (Test-Path $installedVersionFile) { (Get-Content -Raw $installedVersionFile).Trim() } else { $null }
+if (
+    (Test-Path (Join-Path $Destination "include\\onda.h")) -and
+    (Test-Path (Join-Path $Destination "lib")) -and
+    ($installedVersion -eq $Version)
+) {
+    Write-Host "[INFO] Reusing Onda SDK $Version at $Destination"
+    exit 0
+}
+
 $apiBaseUrl = if ($env:ONDA_API_BASE_URL) { $env:ONDA_API_BASE_URL } else { "https://api.github.com/repos/onda-lang/onda/releases" }
 $assetPattern = "onda-*-windows-x64.zip"
-$releaseLabel = if ($Version) { $Version } else { "latest" }
 $headers = @{
     Accept = "application/vnd.github+json"
     "X-GitHub-Api-Version" = "2022-11-28"
@@ -28,21 +45,9 @@ if ($apiToken) {
     $headers.Authorization = "Bearer $apiToken"
 }
 
-Write-Host "[INFO] Resolving Onda release $releaseLabel"
-
-if ($Version) {
-    $releaseApiUrl = "${apiBaseUrl}/tags/$Version"
-    $release = Invoke-RestMethod -Uri $releaseApiUrl -Headers $headers
-} else {
-    try {
-        $release = Invoke-RestMethod -Uri "${apiBaseUrl}/latest" -Headers $headers
-    }
-    catch {
-        Write-Host "[INFO] '/releases/latest' is unavailable; falling back to the releases list."
-        $releases = Invoke-RestMethod -Uri "${apiBaseUrl}?per_page=20" -Headers $headers
-        $release = $releases | Where-Object { -not $_.draft } | Select-Object -First 1
-    }
-}
+Write-Host "[INFO] Resolving Onda release $Version"
+$releaseApiUrl = "${apiBaseUrl}/tags/$Version"
+$release = Invoke-RestMethod -Uri $releaseApiUrl -Headers $headers
 
 $releaseTag = if ($release) { $release.tag_name } else { $null }
 if (-not $releaseTag) {
@@ -90,6 +95,7 @@ try {
     }
 
     Copy-Item -LiteralPath $sdkRoot -Destination $Destination -Recurse -Force
+    Set-Content -LiteralPath (Join-Path $Destination ".onda-version") -Value $releaseTag -NoNewline
     Write-Host "[INFO] Onda SDK $releaseTag ready at $Destination"
 }
 finally {

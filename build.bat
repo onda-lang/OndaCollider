@@ -33,7 +33,7 @@ if not "%ARG3%"=="" (
 
 if "%ONDA_SDK_PATH%"=="" (
     set "ONDA_SDK_PATH=%CD%\build\onda-sdk"
-    echo [INFO] Onda SDK path not provided. Downloading the latest official Onda release...
+    echo [INFO] Onda SDK path not provided. Downloading the configured Onda release...
     powershell -ExecutionPolicy Bypass -File "%~dp0scripts\fetch-onda.ps1" -Destination "!ONDA_SDK_PATH!"
     if errorlevel 1 (
         echo [ERROR] Failed to download Onda SDK.

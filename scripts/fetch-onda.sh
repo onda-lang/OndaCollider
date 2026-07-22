@@ -2,6 +2,21 @@
 set -euo pipefail
 
 DESTINATION="${1:-}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+VERSION_FILE="${SCRIPT_DIR}/../ONDA_VERSION"
+
+if [ -z "${ONDA_VERSION:-}" ]; then
+    if [ ! -f "$VERSION_FILE" ]; then
+        echo "[ERROR] Onda version file not found at ${VERSION_FILE}"
+        exit 1
+    fi
+    ONDA_VERSION="$(tr -d '\r\n' < "$VERSION_FILE")"
+fi
+
+if [ -z "$ONDA_VERSION" ]; then
+    echo "[ERROR] Onda version is empty. Set ONDA_VERSION or update ${VERSION_FILE}."
+    exit 1
+fi
 
 if [ -z "$DESTINATION" ]; then
     echo "Usage: bash ./scripts/fetch-onda.sh /path/to/onda-sdk"
@@ -25,8 +40,11 @@ case "$OS_NAME/$ARCH_NAME" in
         ;;
 esac
 
-if [ -f "${DESTINATION}/include/onda.h" ] && [ -d "${DESTINATION}/lib" ]; then
-    echo "[INFO] Reusing existing Onda SDK at ${DESTINATION}"
+if [ -f "${DESTINATION}/include/onda.h" ] \
+    && [ -d "${DESTINATION}/lib" ] \
+    && [ -f "${DESTINATION}/.onda-version" ] \
+    && [ "$(tr -d '\r\n' < "${DESTINATION}/.onda-version")" = "$ONDA_VERSION" ]; then
+    echo "[INFO] Reusing Onda SDK ${ONDA_VERSION} at ${DESTINATION}"
     exit 0
 fi
 
@@ -45,21 +63,9 @@ fetch_release_json() {
     curl -fsSL "${API_HEADERS[@]}" "$url"
 }
 
-if [ -n "${ONDA_VERSION:-}" ]; then
-    RELEASE_API_URL="${API_BASE_URL}/tags/${ONDA_VERSION}"
-    echo "[INFO] Resolving Onda release ${ONDA_VERSION}"
-    RELEASE_JSON="$(fetch_release_json "$RELEASE_API_URL")"
-else
-    echo "[INFO] Resolving latest Onda release"
-    set +e
-    RELEASE_JSON="$(fetch_release_json "${API_BASE_URL}/latest")"
-    fetch_status=$?
-    set -e
-    if [ "$fetch_status" -ne 0 ]; then
-        echo "[INFO] '/releases/latest' is unavailable; falling back to the releases list."
-        RELEASE_JSON="$(fetch_release_json "${API_BASE_URL}?per_page=20")"
-    fi
-fi
+RELEASE_API_URL="${API_BASE_URL}/tags/${ONDA_VERSION}"
+echo "[INFO] Resolving Onda release ${ONDA_VERSION}"
+RELEASE_JSON="$(fetch_release_json "$RELEASE_API_URL")"
 
 RELEASE_TAG="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print((data[0] if isinstance(data,list) else data).get("tag_name",""))' <<<"$RELEASE_JSON")"
 ARCHIVE_URL="$(python3 -c 'import json,sys,re; data=json.load(sys.stdin); rel=(data[0] if isinstance(data,list) else data); suffix=sys.argv[1]; rx=re.compile(r"/onda-[^/]*-" + re.escape(suffix) + r"$"); print(next((a.get("browser_download_url","") for a in rel.get("assets",[]) if rx.search(a.get("browser_download_url",""))), ""))' "$ASSET_SUFFIX" <<<"$RELEASE_JSON")"
@@ -111,5 +117,6 @@ fi
 rm -rf "$DESTINATION"
 mkdir -p "$(dirname "$DESTINATION")"
 cp -R "$SDK_ROOT" "$DESTINATION"
+printf '%s\n' "$RELEASE_TAG" > "${DESTINATION}/.onda-version"
 
 echo "[INFO] Onda SDK ${RELEASE_TAG} ready at ${DESTINATION}"

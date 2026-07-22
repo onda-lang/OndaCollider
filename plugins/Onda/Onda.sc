@@ -133,9 +133,12 @@ OndaDef {
 				server.sendMsg(*msg);
 				cond.hang;
 
-				if (File.delete(tmpFile).not, {
-					"OndaDef: Could not delete temp file %".format(tmpFile).warn;
-				});
+				if(tmpFile.notNil) {
+					if(File.delete(tmpFile).not) {
+						"OndaDef: Could not delete temp file %".format(tmpFile).warn;
+					};
+					tmpFile = nil;
+				};
 
 				oscFunc.free;
 

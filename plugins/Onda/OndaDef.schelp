@@ -46,7 +46,7 @@ Target link::Classes/Server::. Defaults to `Server.default`.
 ARGUMENT:: action
 Optional function evaluated after successful compile.
 ARGUMENT:: numAllocate
-Reserved for parity with CmajorCollider API.
+Number of runtime instances to preallocate. Defaults to 32. Set this at least as high as the maximum number of simultaneous UGens using the definition.
 
 METHOD:: add
 Alias for `send`.

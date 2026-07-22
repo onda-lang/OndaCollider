@@ -29,11 +29,7 @@ fi
 
 if [ -z "$ONDA_SDK_PATH" ]; then
     ONDA_SDK_PATH="$(pwd)/build/onda-sdk"
-    if [ -n "${ONDA_VERSION:-}" ]; then
-        echo "[INFO] Onda SDK path not provided. Downloading official Onda ${ONDA_VERSION} release..."
-    else
-        echo "[INFO] Onda SDK path not provided. Downloading the latest official Onda release..."
-    fi
+    echo "[INFO] Onda SDK path not provided. Downloading the configured Onda release..."
     bash "$(dirname "$0")/scripts/fetch-onda.sh" "$ONDA_SDK_PATH"
 fi
 

@@ -6,7 +6,7 @@ Pre-built binaries are available in the Release page.
 
 ## Build
 
-Default flow: download the latest published Onda SDK and install the plugin.
+Default flow: download the pinned Onda SDK and install the plugin.
 
 Windows:
 
@@ -20,8 +20,8 @@ Unix:
 ./build.sh /path/to/supercollider /path/to/Extensions
 ```
 
-If the Onda SDK path is omitted, the build scripts resolve the latest published `onda-lang/onda` release and download the matching SDK for the current platform into `build/onda-sdk`.
-Set `ONDA_VERSION` to pin a specific release tag instead.
+If the Onda SDK path is omitted, the build scripts download the release pinned in [`ONDA_VERSION`](ONDA_VERSION) for the current platform into `build/onda-sdk`.
+Set `ONDA_VERSION` to select a different release tag without changing the pin. Cached SDKs are reused only when their recorded version matches.
 
 To use a local Onda checkout/build instead of the downloaded SDK, pass the Onda repo path explicitly and the install destination as the third argument.
 
@@ -74,6 +74,7 @@ Current constraints:
 - `events` must use a single `f32` payload (one control argument per event endpoint).
 - `outs` must use `f32` endpoint types (`f32` or `f32[N]`, flattened to SC channels).
 - Only `buffer[f32...]` endpoints are supported for SC integration.
+- Missing or incompatible SC buffers are unbound from Onda, and the UGen outputs silence until every required buffer is valid and rebound.
 
 ## Examples
 
