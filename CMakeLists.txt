@@ -57,51 +57,14 @@ if(DEFINED ONDA_LLVM_PATH AND NOT DEFINED ONDA_SDK_PATH)
 endif()
 
 set(ONDA_SDK_PATH "${ONDA_SDK_PATH}" CACHE PATH "Path to extracted Onda SDK")
-set(ONDA_INCLUDE_DIR "${ONDA_SDK_PATH}/include" CACHE PATH "Path to Onda headers")
-set(ONDA_LIBRARY_DIR "${ONDA_SDK_PATH}/lib" CACHE PATH "Path to Onda static libraries")
-set(ONDA_BUILD_LIBRARY_DIR "${ONDA_SDK_PATH}/target/release" CACHE PATH "Path to locally built Onda libraries")
 set(ONDA_SYSTEM_LIBS "" CACHE STRING "Additional system libs needed by the Onda static library")
 
-if(NOT EXISTS "${ONDA_INCLUDE_DIR}/onda.h")
-    message(FATAL_ERROR "onda.h not found. Set ONDA_INCLUDE_DIR or ONDA_SDK_PATH.")
-endif()
-
-if(NOT DEFINED ONDA_LIBRARY OR "${ONDA_LIBRARY}" STREQUAL "")
-    if(WIN32)
-        set(_onda_library_candidates
-            "${ONDA_LIBRARY_DIR}/onda.lib"
-            "${ONDA_LIBRARY_DIR}/onda.dll.lib"
-            "${ONDA_BUILD_LIBRARY_DIR}/onda.lib"
-            "${ONDA_BUILD_LIBRARY_DIR}/onda.dll.lib"
-        )
-        file(GLOB _onda_library_fallbacks "${ONDA_LIBRARY_DIR}/*.lib" "${ONDA_BUILD_LIBRARY_DIR}/*.lib")
-    else()
-        set(_onda_library_candidates
-            "${ONDA_LIBRARY_DIR}/libonda.a"
-            "${ONDA_BUILD_LIBRARY_DIR}/libonda.a"
-        )
-        file(GLOB _onda_library_fallbacks "${ONDA_LIBRARY_DIR}/*.a" "${ONDA_BUILD_LIBRARY_DIR}/*.a")
-    endif()
-
-    set(_onda_resolved_library "")
-    foreach(candidate IN LISTS _onda_library_candidates)
-        if(EXISTS "${candidate}")
-            set(_onda_resolved_library "${candidate}")
-            break()
-        endif()
-    endforeach()
-
-    if("${_onda_resolved_library}" STREQUAL "" AND _onda_library_fallbacks)
-        list(SORT _onda_library_fallbacks)
-        list(GET _onda_library_fallbacks 0 _onda_resolved_library)
-    endif()
-
-    set(ONDA_LIBRARY "${_onda_resolved_library}" CACHE FILEPATH "Path to prebuilt Onda static library" FORCE)
-endif()
-
-if(NOT EXISTS "${ONDA_LIBRARY}")
-    message(FATAL_ERROR "Onda static library not found. Set ONDA_LIBRARY or ONDA_SDK_PATH.")
-endif()
+find_package(Onda CONFIG REQUIRED
+    PATHS
+        "${ONDA_SDK_PATH}/cmake"
+        "${ONDA_SDK_PATH}/lib/cmake/Onda"
+    NO_DEFAULT_PATH
+)
 
 # ------------------------------------------------------------------
 # 3. DEFINE PLUGIN TARGET
@@ -136,12 +99,7 @@ sc_add_server_plugin(
 function(finalize_target target_name)
     if(TARGET ${target_name})
         message(STATUS "Configuring target: ${target_name}")
-        target_include_directories(${target_name} PRIVATE "${ONDA_INCLUDE_DIR}")
-        target_link_libraries(${target_name} PRIVATE "${ONDA_LIBRARY}")
-        target_link_libraries(${target_name} PRIVATE ${CMAKE_DL_LIBS})
-        if(WIN32)
-            target_link_libraries(${target_name} PRIVATE Ws2_32 Userenv Ntdll)
-        endif()
+        target_link_libraries(${target_name} PRIVATE Onda::Static)
         if(ONDA_SYSTEM_LIBS)
             target_link_libraries(${target_name} PRIVATE ${ONDA_SYSTEM_LIBS})
         endif()

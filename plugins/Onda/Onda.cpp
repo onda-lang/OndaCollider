@@ -474,7 +474,7 @@ bool ondaCompileStage2(World* world, void* inUserData) {
     compileOptions.block_size = world->mBufLength;
 
     onda_diag_t diag{};
-    onda_program_t* program = onda_compile_file(filePath.c_str(), &compileOptions, &diag);
+    onda_program_t* program = onda_compile_file(filePath.c_str(), &compileOptions, nullptr, &diag);
 
     if (!program) {
         const char* message = diag.message ? diag.message : "unknown compile error";
