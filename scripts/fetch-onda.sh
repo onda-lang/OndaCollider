@@ -3,7 +3,7 @@ set -euo pipefail
 
 DESTINATION="${1:-}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-VERSION_FILE="${SCRIPT_DIR}/../ONDA_VERSION"
+VERSION_FILE="${SCRIPT_DIR}/../onda-version"
 
 if [ -z "${ONDA_VERSION:-}" ]; then
     if [ ! -f "$VERSION_FILE" ]; then

@@ -20,7 +20,7 @@ Unix:
 ./build.sh /path/to/supercollider /path/to/Extensions
 ```
 
-If the Onda SDK path is omitted, the build scripts download the release pinned in [`ONDA_VERSION`](ONDA_VERSION) for the current platform into `build/onda-sdk`.
+If the Onda SDK path is omitted, the build scripts download the release pinned in [`onda-version`](onda-version) for the current platform into `build/onda-sdk`.
 Set `ONDA_VERSION` to select a different release tag without changing the pin. Cached SDKs are reused only when their recorded version matches.
 
 To use a local Onda checkout/build instead of the downloaded SDK, pass the Onda repo path explicitly and the install destination as the third argument.

@@ -11,19 +11,31 @@ fi
 
 PLUGIN_DIR="$(mktemp -d)"
 SCLANG_LOG="${PLUGIN_DIR}/sclang.log"
+SCLANG_CONFIG="${PLUGIN_DIR}/sclang_conf.yaml"
 cleanup() {
     rm -rf -- "${PLUGIN_DIR}"
 }
 trap cleanup EXIT
 cp "${BUILD_DIR}/Onda_scsynth.so" "${PLUGIN_DIR}/"
 
+yaml_quote() {
+    local value="${1//\'/\'\'}"
+    printf "'%s'" "$value"
+}
+
+{
+    printf 'includePaths:\n  - '
+    yaml_quote "${ROOT}/plugins/Onda"
+    printf '\nexcludePaths:\n  - '
+    yaml_quote "${HOME}/.local/share/SuperCollider/Extensions/Onda"
+    printf '\n'
+} > "${SCLANG_CONFIG}"
+
 export ONDA_COLLIDER_ROOT="${ROOT}"
 export ONDA_COLLIDER_PLUGIN_PATH="${PLUGIN_DIR}"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
 
-"${SCLANG_EXECUTABLE:-sclang}" -D \
-    --exclude-path "${HOME}/.local/share/SuperCollider/Extensions/Onda" \
-    --include-path "${ROOT}/plugins/Onda" \
+"${SCLANG_EXECUTABLE:-sclang}" -D -l "${SCLANG_CONFIG}" \
     "${ROOT}/tests/integration.scd" 2>&1 | tee "${SCLANG_LOG}"
 
 if grep -q '^\^\^ ERROR:' "${SCLANG_LOG}"; then

@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $Version) {
-    $pinnedVersionFile = Join-Path (Split-Path -Parent $PSScriptRoot) "ONDA_VERSION"
+    $pinnedVersionFile = Join-Path (Split-Path -Parent $PSScriptRoot) "onda-version"
     if (-not (Test-Path -LiteralPath $pinnedVersionFile)) {
         throw "Onda version file not found at $pinnedVersionFile"
     }
