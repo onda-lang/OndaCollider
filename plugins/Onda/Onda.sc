@@ -115,7 +115,7 @@ OndaDef {
 					compilePath = temporaryPath;
 				};
 
-				oscFunc = OSCFunc.newMatching({ |msg, time, addr|
+				oscFunc = OSCFunc({ |msg, time, addr|
 				var rawStr = msg.last.asString;
 				var parts = rawStr.split($/);
 

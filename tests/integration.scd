@@ -19,6 +19,7 @@ server.waitForBoot {
     Routine({
         var assert, assertClose, compile, readBus;
         var ids, stableA, stableB;
+        var dualDef, dualSynth, replacementDualSynth;
         var eventDef, eventBus, eventSynth;
         var projectDef, projectBus, projectSynth, overrideBuffer, done;
         var arrayDef, badArrayDef, invalidDef;
@@ -54,6 +55,21 @@ server.waitForBoot {
             stableA = OndaDef(\stableId, "outs:\n  out1\nsample:\n  out1 = 0.0");
             stableB = OndaDef(\stableId, "outs:\n  out1\nsample:\n  out1 = 1.0");
             assert.(stableA.id == stableB.id, "a key must retain its definition id");
+
+            dualDef = compile.(\dualOsc, root +/+ "examples" +/+ "dualOsc.onda");
+            assert.(dualDef.outs == 2, "dual oscillator should expose two outputs");
+            dualSynth = {
+                Onda.ar(\dualOsc, (freq: 220, modDepth: 2, detune: 4)) * 0.1
+            }.play(server);
+            server.sync;
+
+            dualDef = compile.(\dualOsc, root +/+ "examples" +/+ "dualOsc.onda");
+            replacementDualSynth = {
+                Onda.ar(\dualOsc, (freq: 330, modDepth: 3, detune: 6)) * 0.1
+            }.play(server);
+            server.sync;
+            dualSynth.free;
+            replacementDualSynth.free;
 
             eventDef = compile.(\eventEdge, fixtures +/+ "event_edge.onda");
             assert.(eventDef.ins.size == 1, "event program should expose one control");
