@@ -1,0 +1,12 @@
+buffers:
+  waveform: buffer<f32>
+
+params:
+  freq = 220.0
+
+init:
+  phase = 0.0
+
+sample:
+  out1 = waveform[phase]
+  phase = (phase + (freq * waveform.len() / samplerate)) % waveform.len()

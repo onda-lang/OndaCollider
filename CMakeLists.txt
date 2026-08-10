@@ -59,6 +59,17 @@ endif()
 set(ONDA_SDK_PATH "${ONDA_SDK_PATH}" CACHE PATH "Path to extracted Onda SDK")
 set(ONDA_SYSTEM_LIBS "" CACHE STRING "Additional system libs needed by the Onda static library")
 
+set(ONDA_VERSION_FILE "${ONDA_SDK_PATH}/.onda-version")
+if(NOT EXISTS "${ONDA_VERSION_FILE}")
+    set(ONDA_VERSION_FILE "${CMAKE_SOURCE_DIR}/ONDA_VERSION")
+endif()
+file(STRINGS "${ONDA_VERSION_FILE}" ONDA_BUILD_VERSION LIMIT_COUNT 1)
+string(STRIP "${ONDA_BUILD_VERSION}" ONDA_BUILD_VERSION)
+if(ONDA_BUILD_VERSION STREQUAL "")
+    message(FATAL_ERROR "Could not determine the Onda SDK version from ${ONDA_VERSION_FILE}")
+endif()
+message(STATUS "Building with Onda version: ${ONDA_BUILD_VERSION}")
+
 find_package(Onda CONFIG REQUIRED
     PATHS
         "${ONDA_SDK_PATH}/cmake"
@@ -100,6 +111,10 @@ function(finalize_target target_name)
     if(TARGET ${target_name})
         message(STATUS "Configuring target: ${target_name}")
         target_link_libraries(${target_name} PRIVATE Onda::Static)
+        target_compile_definitions(
+            ${target_name}
+            PRIVATE ONDACOLLIDER_ONDA_VERSION="${ONDA_BUILD_VERSION}"
+        )
         if(ONDA_SYSTEM_LIBS)
             target_link_libraries(${target_name} PRIVATE ${ONDA_SYSTEM_LIBS})
         endif()
@@ -110,5 +125,27 @@ endfunction()
 
 finalize_target(Onda_scsynth)
 finalize_target(Onda_supernova)
+
+# ------------------------------------------------------------------
+# 5. TESTING
+# ------------------------------------------------------------------
+
+include(CTest)
+if(BUILD_TESTING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_program(SCLANG_EXECUTABLE sclang)
+    find_program(BASH_EXECUTABLE bash)
+    if(SCLANG_EXECUTABLE AND BASH_EXECUTABLE)
+        add_test(
+            NAME OndaIntegration
+            COMMAND
+                "${CMAKE_COMMAND}" -E env
+                "SCLANG_EXECUTABLE=${SCLANG_EXECUTABLE}"
+                "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/run-integration.sh" "${CMAKE_BINARY_DIR}"
+        )
+        set_tests_properties(OndaIntegration PROPERTIES TIMEOUT 120)
+    else()
+        message(STATUS "Skipping Onda integration test: sclang or bash was not found")
+    endif()
+endif()
 
 message(STATUS "Generating plugin targets done")

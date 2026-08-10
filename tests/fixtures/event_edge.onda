@@ -1,0 +1,11 @@
+outs:
+  out1
+
+init:
+  value = 0.0
+
+event bump(amount: f32):
+  value = value + amount
+
+sample:
+  out1 = value

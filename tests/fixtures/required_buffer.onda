@@ -1,0 +1,8 @@
+buffers:
+  waveform: buffer<f32>
+
+outs:
+  out1
+
+sample:
+  out1 = waveform[0]

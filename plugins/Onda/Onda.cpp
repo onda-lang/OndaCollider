@@ -2,13 +2,19 @@
 #include "Onda.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
+#include <memory>
+#include <new>
 #include <sstream>
 #include <string>
+#include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -19,7 +25,221 @@ std::vector<PatchEntry> Onda::patchStorage;
 namespace {
 
 constexpr int kMaxReplySize = 4096;
-constexpr int kPatchStorageCapacity = 2048;
+constexpr int kMaxDefinitionId = 65536;
+constexpr int kMaxPreallocatedInstances = 4096;
+constexpr size_t kMaxPathBytes = 16384;
+// Mirror Onda 0.7's editable-project transport limits so oversized snapshots are
+// rejected before the host allocates their contents.
+constexpr uintmax_t kMiB = UINTMAX_C(1024) * UINTMAX_C(1024);
+constexpr uintmax_t kMaxProjectDocuments = 4096;
+constexpr uintmax_t kMaxProjectAssets = 4096;
+constexpr uintmax_t kOndaBufferHeaderBytes = 64;
+constexpr uintmax_t kMaxProjectFileCount = kMaxProjectDocuments + kMaxProjectAssets + 1;
+constexpr uintmax_t kMaxProjectFileBytes = UINTMAX_C(1024) * kMiB + kOndaBufferHeaderBytes;
+constexpr uintmax_t kMaxProjectTotalBytes = UINTMAX_C(64) * kMiB
+    + UINTMAX_C(64) * kMiB
+    + UINTMAX_C(2048) * kMiB
+    + kMaxProjectAssets * kOndaBufferHeaderBytes;
+
+class ScopedOndaDiagnostic {
+public:
+    ScopedOndaDiagnostic() = default;
+    ScopedOndaDiagnostic(const ScopedOndaDiagnostic&) = delete;
+    ScopedOndaDiagnostic& operator=(const ScopedOndaDiagnostic&) = delete;
+
+    ~ScopedOndaDiagnostic() { onda_diag_dispose(&mDiagnostic); }
+
+    onda_diag_t* get() { return &mDiagnostic; }
+    onda_diag_t* operator->() { return &mDiagnostic; }
+
+    void reset() { onda_diag_dispose(&mDiagnostic); }
+
+private:
+    onda_diag_t mDiagnostic{};
+};
+
+template <typename T>
+T* rtAllocateObjects(World* world, int count) {
+    static_assert(std::is_nothrow_default_constructible<T>::value, "RT state construction must not throw");
+    static_assert(std::is_trivially_destructible<T>::value, "RT state destruction must be trivial");
+    if (count <= 0) {
+        return nullptr;
+    }
+
+    auto* objects = static_cast<T*>(RTAlloc(world, static_cast<size_t>(count) * sizeof(T)));
+    if (!objects) {
+        return nullptr;
+    }
+    for (int i = 0; i < count; ++i) {
+        new (objects + i) T{};
+    }
+    return objects;
+}
+
+struct ProjectFileStorage {
+    std::filesystem::path absolutePath;
+    std::string relativePath;
+    uintmax_t expectedBytes = 0;
+    std::filesystem::file_time_type expectedWriteTime;
+    std::vector<uint8_t> bytes;
+};
+
+std::string lowercaseAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+bool isProjectPath(const std::filesystem::path& path) {
+    return lowercaseAscii(path.extension().u8string()) == ".ondaproject";
+}
+
+bool readProjectFile(
+    ProjectFileStorage& file,
+    std::string& error) {
+    if (file.expectedBytes > static_cast<uintmax_t>(std::numeric_limits<size_t>::max())
+        || file.expectedBytes > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
+        error = "Project file is too large for this host: '" + file.absolutePath.u8string() + "'.";
+        return false;
+    }
+
+    std::ifstream stream(file.absolutePath, std::ios::binary);
+    if (!stream) {
+        error = "Failed to open project file '" + file.absolutePath.u8string() + "'.";
+        return false;
+    }
+
+    file.bytes.resize(static_cast<size_t>(file.expectedBytes));
+    if (!file.bytes.empty()) {
+        stream.read(
+            reinterpret_cast<char*>(file.bytes.data()),
+            static_cast<std::streamsize>(file.bytes.size()));
+        if (stream.gcount() != static_cast<std::streamsize>(file.bytes.size())) {
+            error = "Project file changed while being read: '" + file.absolutePath.u8string() + "'.";
+            return false;
+        }
+    }
+
+    std::error_code ec;
+    const uintmax_t finalBytes = std::filesystem::file_size(file.absolutePath, ec);
+    if (ec
+        || finalBytes != file.expectedBytes
+        || std::filesystem::last_write_time(file.absolutePath, ec) != file.expectedWriteTime
+        || ec) {
+        error = "Project file changed while taking the compile snapshot: '"
+            + file.absolutePath.u8string() + "'.";
+        return false;
+    }
+
+    return true;
+}
+
+PatchEntry* patchEntryForDefinition(int definitionId) {
+    if (definitionId < 1 || definitionId > static_cast<int>(Onda::patchStorage.size())) {
+        return nullptr;
+    }
+
+    return &Onda::patchStorage[static_cast<size_t>(definitionId - 1)];
+}
+
+onda_program_t* compileProjectFile(
+    const std::filesystem::path& manifestPath,
+    const onda_compile_options_t& compileOptions,
+    std::unordered_set<std::string>& projectBufferDefaults,
+    ScopedOndaDiagnostic& diag,
+    std::string& error) {
+    std::error_code ec;
+    const std::filesystem::path canonicalManifest = std::filesystem::canonical(manifestPath, ec);
+    if (ec) {
+        error = "Failed to resolve Onda project '" + manifestPath.u8string() + "': " + ec.message();
+        return nullptr;
+    }
+
+    const std::filesystem::path projectRoot = canonicalManifest.parent_path();
+    std::vector<ProjectFileStorage> storage;
+    uintmax_t totalBytes = 0;
+
+    try {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(projectRoot)) {
+            if (entry.is_symlink() || !entry.is_regular_file()) {
+                continue;
+            }
+
+            if (storage.size() >= kMaxProjectFileCount) {
+                error = "Onda project contains too many files.";
+                return nullptr;
+            }
+
+            ProjectFileStorage file;
+            file.absolutePath = entry.path();
+            file.relativePath = entry.path().lexically_relative(projectRoot).generic_u8string();
+            file.expectedBytes = entry.file_size();
+            file.expectedWriteTime = entry.last_write_time();
+            if (file.expectedBytes > kMaxProjectFileBytes) {
+                error = "Onda project file exceeds the transport limit: '" + file.relativePath + "'.";
+                return nullptr;
+            }
+            if (file.expectedBytes > kMaxProjectTotalBytes - totalBytes) {
+                error = "Onda project exceeds the aggregate transport limit.";
+                return nullptr;
+            }
+            totalBytes += file.expectedBytes;
+            storage.push_back(std::move(file));
+        }
+    } catch (const std::filesystem::filesystem_error& filesystemError) {
+        error = "Failed to read Onda project directory '" + projectRoot.u8string() + "': "
+            + filesystemError.what();
+        return nullptr;
+    }
+
+    std::sort(storage.begin(), storage.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.relativePath < rhs.relativePath;
+    });
+
+    for (auto& file : storage) {
+        if (!readProjectFile(file, error)) {
+            return nullptr;
+        }
+    }
+
+    std::vector<onda_project_file_t> files;
+    files.reserve(storage.size());
+    for (const auto& file : storage) {
+        files.push_back({
+            file.relativePath.c_str(),
+            file.bytes.empty() ? nullptr : file.bytes.data(),
+            file.bytes.size(),
+        });
+    }
+
+    const std::string selectedManifest = canonicalManifest.lexically_relative(projectRoot).generic_u8string();
+    onda_project_image_t* rawImage = onda_project_image_load_files(
+        files.data(),
+        files.size(),
+        selectedManifest.c_str(),
+        diag.get());
+    if (!rawImage) {
+        return nullptr;
+    }
+    std::unique_ptr<onda_project_image_t, decltype(&onda_project_image_destroy)> image(
+        rawImage,
+        onda_project_image_destroy);
+
+    const int bufferCount = onda_project_image_buffer_count(image.get());
+    if (bufferCount < 0) {
+        error = "Failed to query buffer bindings from Onda project image.";
+        return nullptr;
+    }
+    for (int i = 0; i < bufferCount; ++i) {
+        if (const char* name = onda_project_image_buffer_name(image.get(), i)) {
+            projectBufferDefaults.emplace(name);
+        }
+    }
+
+    diag.reset();
+    return onda_project_image_compile(image.get(), &compileOptions, diag.get());
+}
 
 const char* inputKindToTag(OndaInputKind kind) {
     switch (kind) {
@@ -39,8 +259,20 @@ const char* inputKindToTag(OndaInputKind kind) {
 int scBufferIndex(float value) {
     if (!std::isfinite(value)
         || value < 0.0f
+        || std::trunc(value) != value
         || static_cast<double>(value) > static_cast<double>(std::numeric_limits<int>::max())) {
         return -1;
+    }
+
+    return static_cast<int>(value);
+}
+
+int definitionIdFromControl(float value) {
+    if (!std::isfinite(value)
+        || std::trunc(value) != value
+        || value < 1.0f
+        || value > static_cast<float>(kMaxDefinitionId)) {
+        return 0;
     }
 
     return static_cast<int>(value);
@@ -67,7 +299,11 @@ void destroyCompiledProgram(CompiledProgram* program) {
     delete program;
 }
 
-bool buildProgramMetadata(CompiledProgram& compiled, std::string& error) {
+bool buildProgramMetadata(
+    CompiledProgram& compiled,
+    bool compiledFromProject,
+    const std::unordered_set<std::string>& projectBufferDefaults,
+    std::string& error) {
     if (!compiled.program) {
         error = "Compiled program handle is null.";
         return false;
@@ -78,32 +314,63 @@ bool buildProgramMetadata(CompiledProgram& compiled, std::string& error) {
     const int paramCount = onda_param_count(compiled.program);
     const int eventCount = onda_event_count(compiled.program);
     const int outputCount = onda_output_count(compiled.program);
+    const int bufferArrayCount = onda_buffer_array_count(compiled.program);
 
-    if (inputCount < 0 || paramCount < 0 || eventCount < 0 || bufferCount < 0 || outputCount < 0) {
+    if (inputCount < 0
+        || paramCount < 0
+        || eventCount < 0
+        || bufferCount < 0
+        || outputCount < 0
+        || bufferArrayCount < 0) {
         error = "Failed to query endpoint counts from Onda program.";
         return false;
+    }
+
+    std::vector<bool> bufferArraySlots(static_cast<size_t>(bufferCount), false);
+    for (int i = 0; i < bufferArrayCount; ++i) {
+        const int first = onda_buffer_array_first(compiled.program, i);
+        const int length = onda_buffer_array_len(compiled.program, i);
+        if (first < 0 || length < 1 || first > bufferCount - length) {
+            error = "Failed to query buffer-array metadata from Onda program.";
+            return false;
+        }
+
+        if (!compiledFromProject) {
+            const char* name = onda_buffer_array_name(compiled.program, i);
+            error = "Host constraint: buffer array '";
+            error += name ? name : std::to_string(i);
+            error += "' requires an .ondaproject default and cannot be supplied from SuperCollider.";
+            return false;
+        }
+
+        for (int slot = first; slot < first + length; ++slot) {
+            bufferArraySlots[static_cast<size_t>(slot)] = true;
+        }
     }
 
     compiled.inputs.clear();
     compiled.outputs.clear();
     compiled.requiredInputChannels = 0;
     compiled.requiredOutputChannels = 0;
-    compiled.outputChannels = 0;
 
-    compiled.inputs.reserve(static_cast<size_t>(inputCount + paramCount + eventCount + bufferCount));
+    const size_t totalInputDescriptors = static_cast<size_t>(inputCount)
+        + static_cast<size_t>(paramCount)
+        + static_cast<size_t>(eventCount)
+        + static_cast<size_t>(bufferCount);
+    compiled.inputs.reserve(totalInputDescriptors);
     compiled.outputs.reserve(static_cast<size_t>(outputCount));
 
     for (int i = 0; i < inputCount; ++i) {
         const int arrayLen = onda_input_array_len(compiled.program, i);
-        if (arrayLen > 1) {
+        if (arrayLen != 1) {
             std::ostringstream msg;
-            msg << "Host constraint: SuperCollider integration does not support input arrays ('";
+            msg << "Host constraint: input '";
             if (const char* name = onda_input_name(compiled.program, i)) {
                 msg << name;
             } else {
                 msg << i;
             }
-            msg << "').";
+            msg << "' must be a scalar for SuperCollider integration.";
             error = msg.str();
             return false;
         }
@@ -142,15 +409,15 @@ bool buildProgramMetadata(CompiledProgram& compiled, std::string& error) {
 
     for (int i = 0; i < paramCount; ++i) {
         const int arrayLen = onda_param_array_len(compiled.program, i);
-        if (arrayLen > 1) {
+        if (arrayLen != 1) {
             std::ostringstream msg;
-            msg << "Host constraint: SuperCollider integration does not support param arrays ('";
+            msg << "Host constraint: param '";
             if (const char* name = onda_param_name(compiled.program, i)) {
                 msg << name;
             } else {
                 msg << i;
             }
-            msg << "').";
+            msg << "' must be a scalar for SuperCollider integration.";
             error = msg.str();
             return false;
         }
@@ -188,13 +455,25 @@ bool buildProgramMetadata(CompiledProgram& compiled, std::string& error) {
 
     for (int i = 0; i < eventCount; ++i) {
         const int eventParamCount = onda_event_param_count(compiled.program, i);
+        if (eventParamCount != 1) {
+            std::ostringstream msg;
+            msg << "Host constraint: event '";
+            if (const char* name = onda_event_name(compiled.program, i)) {
+                msg << name;
+            } else {
+                msg << i;
+            }
+            msg << "' must use a single scalar f32 payload for SuperCollider integration.";
+            error = msg.str();
+            return false;
+        }
+
         const int payloadBytes = onda_event_payload_bytes(compiled.program, i);
         const int elemType = onda_event_param_elem_type(compiled.program, i, 0);
         const int arrayLen = onda_event_param_array_len(compiled.program, i, 0);
         const int isSlice = onda_event_param_is_slice(compiled.program, i, 0);
 
-        if (eventParamCount != 1
-            || payloadBytes != static_cast<int>(sizeof(float))
+        if (payloadBytes != static_cast<int>(sizeof(float))
             || elemType != ONDA_PRIMITIVE_F32
             || arrayLen != 1
             || isSlice != 0) {
@@ -218,40 +497,35 @@ bool buildProgramMetadata(CompiledProgram& compiled, std::string& error) {
         desc.elemType = ONDA_PRIMITIVE_F32;
         desc.elemBytes = static_cast<int>(sizeof(float));
         desc.arrayLen = 1;
-
-        if (onda_event_param_has_default(compiled.program, i, 0) > 0) {
-            float defaultValue = 0.0f;
-            const int copied = onda_event_param_default_bytes(
-                compiled.program,
-                i,
-                0,
-                &defaultValue,
-                static_cast<int>(sizeof(defaultValue)));
-            if (copied != static_cast<int>(sizeof(defaultValue))) {
-                std::ostringstream msg;
-                msg << "Failed to query default value for event '";
-                msg << desc.name;
-                msg << "'.";
-                error = msg.str();
-                return false;
-            }
-            desc.hasInit = true;
-            desc.init = defaultValue;
-        }
+        // Event controls use SC trigger semantics. Zero is idle; a positive edge triggers the
+        // event and the positive edge value is the single f32 payload.
+        desc.hasInit = true;
+        desc.init = 0.0f;
 
         compiled.inputs.push_back(std::move(desc));
     }
 
     for (int i = 0; i < bufferCount; ++i) {
+        if (bufferArraySlots[static_cast<size_t>(i)]) {
+            // SC has no buffer-array endpoint. Project compilation has already installed the
+            // immutable asset (or Onda's neutral default) for every physical array slot.
+            continue;
+        }
+
+        const char* rawName = onda_buffer_name(compiled.program, i);
+        const std::string name = rawName ? rawName : ("buffer" + std::to_string(i + 1));
+        const bool hasProjectDefault = projectBufferDefaults.find(name) != projectBufferDefaults.end();
         const int elemType = onda_buffer_elem_type(compiled.program, i);
         if (elemType != ONDA_PRIMITIVE_F32) {
+            if (compiledFromProject) {
+                // The project-owned asset is already bound by Onda. Non-f32 buffers cannot be
+                // overridden by an SC SndBuf, so they do not need an exposed UGen input. When the
+                // manifest has no asset, the project image retains Onda's neutral default.
+                continue;
+            }
             std::ostringstream msg;
             msg << "Host constraint: buffer '";
-            if (const char* name = onda_buffer_name(compiled.program, i)) {
-                msg << name;
-            } else {
-                msg << i;
-            }
+            msg << name;
             msg << "' must use f32 elements for SuperCollider integration.";
             error = msg.str();
             return false;
@@ -284,7 +558,7 @@ bool buildProgramMetadata(CompiledProgram& compiled, std::string& error) {
         }
 
         OndaInputDescriptor desc;
-        desc.name = onda_buffer_name(compiled.program, i) ? onda_buffer_name(compiled.program, i) : ("buffer" + std::to_string(i + 1));
+        desc.name = name;
         desc.audioRate = false;
         desc.kind = OndaInputKind::Buffer;
         desc.ondaIndex = i;
@@ -292,18 +566,20 @@ bool buildProgramMetadata(CompiledProgram& compiled, std::string& error) {
         desc.elemBytes = static_cast<int>(sizeof(float));
         desc.arrayLen = 1;
         desc.hasInit = true;
-        desc.init = 0.0f;
+        desc.init = hasProjectDefault ? -1.0f : 0.0f;
         desc.bufferChannelsKind = channelsKind;
         desc.bufferChannelsStatic = channelsStatic;
         desc.bufferMayWrite = (mayWrite > 0);
+        desc.hasProjectDefault = hasProjectDefault;
 
         compiled.inputs.push_back(std::move(desc));
     }
 
     for (int i = 0; i < outputCount; ++i) {
-        int arrayLen = onda_output_array_len(compiled.program, i);
+        const int arrayLen = onda_output_array_len(compiled.program, i);
         if (arrayLen < 1) {
-            arrayLen = 1;
+            error = "Failed to query output array length at index " + std::to_string(i) + ".";
+            return false;
         }
 
         const int elemType = onda_output_elem_type(compiled.program, i);
@@ -321,14 +597,16 @@ bool buildProgramMetadata(CompiledProgram& compiled, std::string& error) {
         }
 
         const int typeBytes = onda_output_type_bytes(compiled.program, i);
-        if (typeBytes > 0) {
-            const int expected = static_cast<int>(sizeof(float)) * arrayLen;
-            if (typeBytes != expected) {
-                std::ostringstream msg;
-                msg << "Unexpected output byte layout at index " << i << ".";
-                error = msg.str();
-                return false;
-            }
+        if (arrayLen > std::numeric_limits<int>::max() / static_cast<int>(sizeof(float))) {
+            error = "Output array byte layout exceeds the host limit at index " + std::to_string(i) + ".";
+            return false;
+        }
+        const int expected = static_cast<int>(sizeof(float)) * arrayLen;
+        if (typeBytes != expected) {
+            std::ostringstream msg;
+            msg << "Unexpected output byte layout at index " << i << ".";
+            error = msg.str();
+            return false;
         }
 
         OndaInputDescriptor outDesc;
@@ -338,17 +616,26 @@ bool buildProgramMetadata(CompiledProgram& compiled, std::string& error) {
         outDesc.elemBytes = static_cast<int>(sizeof(float));
         outDesc.arrayLen = arrayLen;
 
+        if (arrayLen > std::numeric_limits<int>::max() - compiled.requiredOutputChannels) {
+            error = "Flattened output count exceeds the host limit.";
+            return false;
+        }
         compiled.requiredOutputChannels += arrayLen;
-        compiled.outputChannels += arrayLen;
         compiled.outputs.push_back(std::move(outDesc));
     }
 
     return true;
 }
 
-void writeReply(std::string& reply, int hash, const CompiledProgram& compiled) {
+void writeReply(
+    std::string& reply,
+    int definitionId,
+    int generation,
+    const CompiledProgram& compiled) {
     reply = "_onda/";
-    reply += std::to_string(hash);
+    reply += std::to_string(definitionId);
+    reply += "/";
+    reply += std::to_string(generation);
     reply += "/";
     reply += std::to_string(compiled.inputs.size());
 
@@ -357,29 +644,34 @@ void writeReply(std::string& reply, int hash, const CompiledProgram& compiled) {
         reply += input.name;
         reply += "/";
         reply += input.audioRate ? "0" : "1";
-
-        reply += "/_kind/";
+        reply += "/";
         reply += inputKindToTag(input.kind);
-
-        if (input.hasInit) {
-            reply += "/_init/";
-            reply += std::to_string(input.init);
-        }
-
+        reply += input.hasInit ? "/1/" : "/0/";
+        reply += std::to_string(input.hasInit ? input.init : 0.0f);
     }
 
     reply += "/";
-    reply += std::to_string(compiled.outputChannels);
+    reply += std::to_string(compiled.requiredOutputChannels);
 }
 
 struct OndaCompileCmdData {
-    int hash = 0;
+    int definitionId = 0;
+    int generation = 0;
     int numAllocate = 0;
     char* path = nullptr;
     char replyMsg[kMaxReplySize + 1] = {0};
     CompiledProgram* newProgram = nullptr;
     CompiledProgram* oldProgram = nullptr;
 };
+
+void writeFailureReply(OndaCompileCmdData& cmdData) {
+    std::snprintf(
+        cmdData.replyMsg,
+        sizeof(cmdData.replyMsg),
+        "_onda/%d/%d/_fail",
+        cmdData.definitionId,
+        cmdData.generation);
+}
 
 // RT cleanup stage (audio thread): release command payload allocated with RTAlloc.
 void ondaCompileCleanup(World* world, void* inUserData) {
@@ -392,6 +684,7 @@ void ondaCompileCleanup(World* world, void* inUserData) {
         RTFree(world, cmdData->path);
     }
 
+    cmdData->~OndaCompileCmdData();
     RTFree(world, cmdData);
 }
 
@@ -414,26 +707,45 @@ bool ondaCompileStage4(World* /*world*/, void* inUserData) {
 // RT stage 3 (audio thread): publish program swap and notify live units.
 bool ondaCompileStage3(World* /*world*/, void* inUserData) {
     auto* cmdData = static_cast<OndaCompileCmdData*>(inUserData);
-    if (!cmdData || !cmdData->newProgram) {
+    if (!cmdData) {
         return true;
     }
 
-    CompiledProgram* insertedProgram = cmdData->newProgram;
-    CompiledProgram* result = Onda::insertOrUpdateProgram(cmdData->hash, insertedProgram);
-
-    if (result == insertedProgram) {
-        // Storage full. Keep insertedProgram in cmdData->newProgram so stage4 deletes it.
-        cmdData->oldProgram = nullptr;
+    if (!cmdData->newProgram) {
+        Onda::observeGeneration(cmdData->definitionId, cmdData->generation);
         return true;
     }
 
-    cmdData->oldProgram = result;
+    CompiledProgram* publishedProgram = cmdData->newProgram;
+    const ProgramPublishResult publish = Onda::publishProgram(
+        cmdData->definitionId,
+        cmdData->generation,
+        publishedProgram);
 
-    if (result) {
-        for (const auto& slot : result->instances) {
+    if (publish.status == ProgramPublishStatus::Stale) {
+        Print(
+            "WARNING: Onda: discarded stale compile for definition %d generation %d.\n",
+            cmdData->definitionId,
+            cmdData->generation);
+        writeFailureReply(*cmdData);
+        return true;
+    }
+    if (publish.status == ProgramPublishStatus::InvalidDefinition) {
+        Print(
+            "ERROR: Onda: definition id %d is outside the supported range 1..%d.\n",
+            cmdData->definitionId,
+            static_cast<int>(Onda::patchStorage.size()));
+        writeFailureReply(*cmdData);
+        return true;
+    }
+
+    cmdData->oldProgram = publish.replacedProgram;
+
+    if (publish.replacedProgram) {
+        for (const auto& slot : publish.replacedProgram->instances) {
             Onda* unit = slot.unit;
             if (unit) {
-                unit->handleHotSwap(cmdData->hash, insertedProgram);
+                unit->handleHotSwap(cmdData->definitionId, publishedProgram);
             }
         }
     }
@@ -444,7 +756,7 @@ bool ondaCompileStage3(World* /*world*/, void* inUserData) {
 }
 
 // NRT stage 2 (worker thread): compile source and preallocate Onda instances.
-bool ondaCompileStage2(World* world, void* inUserData) {
+bool ondaCompileStage2Impl(World* world, void* inUserData) {
     auto* cmdData = static_cast<OndaCompileCmdData*>(inUserData);
     if (!cmdData) {
         Print("ERROR: Onda: invalid compile command payload.\n");
@@ -452,19 +764,41 @@ bool ondaCompileStage2(World* world, void* inUserData) {
     }
 
     if (!cmdData->path) {
-        Print("ERROR: Onda: invalid cmd->path.\n");
-        return false;
+        Print("ERROR: Onda: compile command has no valid source path.\n");
+        writeFailureReply(*cmdData);
+        return true;
+    }
+    if (cmdData->definitionId < 1 || cmdData->definitionId > kMaxDefinitionId) {
+        Print(
+            "ERROR: Onda: definition id must be between 1 and %d (received %d).\n",
+            kMaxDefinitionId,
+            cmdData->definitionId);
+        writeFailureReply(*cmdData);
+        return true;
+    }
+    if (cmdData->generation < 1) {
+        Print("ERROR: Onda: generation must be positive (received %d).\n", cmdData->generation);
+        writeFailureReply(*cmdData);
+        return true;
+    }
+    if (cmdData->numAllocate < 1 || cmdData->numAllocate > kMaxPreallocatedInstances) {
+        Print(
+            "ERROR: Onda: numAllocate must be between 1 and %d (received %d).\n",
+            kMaxPreallocatedInstances,
+            cmdData->numAllocate);
+        writeFailureReply(*cmdData);
+        return true;
     }
 
-    std::string filePath = cmdData->path;
+    const std::filesystem::path filePath = std::filesystem::u8path(cmdData->path);
     std::error_code ec;
     
     const bool isFile = std::filesystem::exists(filePath, ec)
             && std::filesystem::is_regular_file(filePath, ec);
     
     if (!isFile) {
-        Print("ERROR: Onda: failed to read source file '%s'.\n", filePath.c_str());
-        std::snprintf(cmdData->replyMsg, sizeof(cmdData->replyMsg), "_onda/%d/_fail", cmdData->hash);
+        Print("ERROR: Onda: failed to read source or project file '%s'.\n", cmdData->path);
+        writeFailureReply(*cmdData);
         return true;
     }
 
@@ -473,42 +807,60 @@ bool ondaCompileStage2(World* world, void* inUserData) {
     compileOptions.sample_rate = static_cast<float>(world->mSampleRate);
     compileOptions.block_size = world->mBufLength;
 
-    onda_diag_t diag{};
-    onda_program_t* program = onda_compile_file(filePath.c_str(), &compileOptions, nullptr, &diag);
-
-    if (!program) {
-        const char* message = diag.message ? diag.message : "unknown compile error";
-        Print("ERROR: Onda: compile failed (%d:%d): %s\n", diag.line, diag.column, message);
-        std::snprintf(cmdData->replyMsg, sizeof(cmdData->replyMsg), "_onda/%d/_fail", cmdData->hash);
-        return true;
+    ScopedOndaDiagnostic diag;
+    std::string loadError;
+    std::unordered_set<std::string> projectBufferDefaults;
+    std::unique_ptr<CompiledProgram, decltype(&destroyCompiledProgram)> compiled(
+        new CompiledProgram(),
+        destroyCompiledProgram);
+    const bool compiledFromProject = isProjectPath(filePath);
+    if (compiledFromProject) {
+        compiled->program = compileProjectFile(
+            filePath,
+            compileOptions,
+            projectBufferDefaults,
+            diag,
+            loadError);
+    } else {
+        compiled->program = onda_compile_file(cmdData->path, &compileOptions, nullptr, diag.get());
     }
 
-    auto* compiled = new CompiledProgram();
-    compiled->program = program;
+    if (!compiled->program) {
+        const char* message = !loadError.empty()
+            ? loadError.c_str()
+            : (diag->message ? diag->message : "unknown compile error");
+        const char* diagnosticFile = diag->file ? diag->file : cmdData->path;
+        Print(
+            "ERROR: Onda: compile failed in '%s' (%d:%d): %s\n",
+            diagnosticFile,
+            diag->line,
+            diag->column,
+            message);
+        writeFailureReply(*cmdData);
+        return true;
+    }
 
     std::string metaError;
-    if (!buildProgramMetadata(*compiled, metaError)) {
+    if (!buildProgramMetadata(*compiled, compiledFromProject, projectBufferDefaults, metaError)) {
         Print("ERROR: Onda: %s\n", metaError.c_str());
-        destroyCompiledProgram(compiled);
-        std::snprintf(cmdData->replyMsg, sizeof(cmdData->replyMsg), "_onda/%d/_fail", cmdData->hash);
+        writeFailureReply(*cmdData);
         return true;
     }
 
-    const int preallocateCount = (cmdData->numAllocate > 0) ? cmdData->numAllocate : 1;
+    const int preallocateCount = cmdData->numAllocate;
     compiled->instances.reserve(static_cast<size_t>(preallocateCount));
     for (int i = 0; i < preallocateCount; ++i) {
-        onda_diag_t instanceDiag{};
+        ScopedOndaDiagnostic instanceDiag;
         onda_instance_t* instance = onda_instance_create(
             compiled->program,
             compiled->requiredInputChannels,
             (compiled->requiredOutputChannels > 0) ? compiled->requiredOutputChannels : 1,
-            &instanceDiag);
+            instanceDiag.get());
 
         if (!instance) {
-            const char* msg = instanceDiag.message ? instanceDiag.message : "unknown instance creation error";
-            Print("ERROR: Onda: failed to preallocate instance %d/%d for hash %d: %s\n", i + 1, preallocateCount, cmdData->hash, msg);
-            destroyCompiledProgram(compiled);
-            std::snprintf(cmdData->replyMsg, sizeof(cmdData->replyMsg), "_onda/%d/_fail", cmdData->hash);
+            const char* msg = instanceDiag->message ? instanceDiag->message : "unknown instance creation error";
+            Print("ERROR: Onda: failed to preallocate instance %d/%d for definition %d: %s\n", i + 1, preallocateCount, cmdData->definitionId, msg);
+            writeFailureReply(*cmdData);
             return true;
         }
 
@@ -519,26 +871,42 @@ bool ondaCompileStage2(World* world, void* inUserData) {
     }
 
     std::string reply;
-    writeReply(reply, cmdData->hash, *compiled);
+    writeReply(reply, cmdData->definitionId, cmdData->generation, *compiled);
 
     if (reply.size() > static_cast<size_t>(kMaxReplySize)) {
         Print("ERROR: Onda: reply payload too large (%d).\n", static_cast<int>(reply.size()));
-        destroyCompiledProgram(compiled);
-        std::snprintf(cmdData->replyMsg, sizeof(cmdData->replyMsg), "_onda/%d/_fail", cmdData->hash);
+        writeFailureReply(*cmdData);
         return true;
     }
 
     std::strncpy(cmdData->replyMsg, reply.c_str(), sizeof(cmdData->replyMsg) - 1);
     cmdData->replyMsg[sizeof(cmdData->replyMsg) - 1] = '\0';
-    cmdData->newProgram = compiled;
+    cmdData->newProgram = compiled.release();
 
     Print(
-        "Onda: compiled hash %d (%d inputs, %d flattened outputs, %d preallocated instances).\n",
-        cmdData->hash,
-        static_cast<int>(compiled->inputs.size()),
-        compiled->outputChannels,
-        static_cast<int>(compiled->instances.size()));
+        "Onda: compiled definition %d generation %d (%d inputs, %d flattened outputs, %d preallocated instances).\n",
+        cmdData->definitionId,
+        cmdData->generation,
+        static_cast<int>(cmdData->newProgram->inputs.size()),
+        cmdData->newProgram->requiredOutputChannels,
+        static_cast<int>(cmdData->newProgram->instances.size()));
 
+    return true;
+}
+
+bool ondaCompileStage2(World* world, void* inUserData) {
+    auto* cmdData = static_cast<OndaCompileCmdData*>(inUserData);
+    try {
+        return ondaCompileStage2Impl(world, inUserData);
+    } catch (const std::exception& exception) {
+        Print("ERROR: Onda: compile preparation failed: %s\n", exception.what());
+    } catch (...) {
+        Print("ERROR: Onda: compile preparation failed with an unknown exception.\n");
+    }
+
+    if (cmdData) {
+        writeFailureReply(*cmdData);
+    }
     return true;
 }
 
@@ -549,27 +917,31 @@ void ondaCompile(World* inWorld, void* /*inUserData*/, struct sc_msg_iter* args,
         return;
     }
 
-    std::memset(cmdData, 0, sizeof(OndaCompileCmdData));
+    new (cmdData) OndaCompileCmdData{};
 
-    cmdData->hash = args->geti();
+    cmdData->definitionId = args->geti();
+    cmdData->generation = args->geti();
     cmdData->numAllocate = args->geti();
     
     const char* path = args->gets();
 
-    if (!path) {
-        return;
+    if (path) {
+        const size_t len = std::strlen(path);
+        if (len <= kMaxPathBytes) {
+            cmdData->path = static_cast<char*>(RTAlloc(inWorld, len + 1));
+            if (cmdData->path) {
+                std::memcpy(cmdData->path, path, len + 1);
+            } else {
+                Print("ERROR: Onda: failed to allocate compile path.\n");
+                writeFailureReply(*cmdData);
+            }
+        } else {
+            Print("ERROR: Onda: compile path exceeds the %d-byte limit.\n", static_cast<int>(kMaxPathBytes));
+            writeFailureReply(*cmdData);
+        }
+    } else {
+        writeFailureReply(*cmdData);
     }
-
-    const size_t len = std::strlen(path);
-
-    cmdData->path = static_cast<char*>(RTAlloc(inWorld, len + 1));
-    if (!cmdData->path) {
-        Print("ERROR: Onda: failed to allocate path.\n");
-        RTFree(inWorld, cmdData);
-        return;
-    }
-
-    std::memcpy(cmdData->path, path, len + 1);
 
     DoAsynchronousCommand(
         inWorld,
@@ -585,7 +957,8 @@ void ondaCompile(World* inWorld, void* /*inUserData*/, struct sc_msg_iter* args,
 }
 
 struct OndaFreeCmdData {
-    int hash = 0;
+    int definitionId = 0;
+    int generation = 0;
     CompiledProgram* programToDelete = nullptr;
 };
 
@@ -593,6 +966,7 @@ struct OndaFreeCmdData {
 void ondaFreeCleanup(World* world, void* inUserData) {
     auto* cmdData = static_cast<OndaFreeCmdData*>(inUserData);
     if (cmdData) {
+        cmdData->~OndaFreeCmdData();
         RTFree(world, cmdData);
     }
 }
@@ -615,12 +989,12 @@ bool ondaFreeStage3(World* /*world*/, void* inUserData) {
         return true;
     }
 
-    cmdData->programToDelete = Onda::removeProgram(cmdData->hash);
+    cmdData->programToDelete = Onda::removeProgram(cmdData->definitionId, cmdData->generation);
     if (cmdData->programToDelete) {
         for (const auto& slot : cmdData->programToDelete->instances) {
             Onda* unit = slot.unit;
             if (unit) {
-                unit->handleFree(cmdData->hash);
+                unit->handleFree(cmdData->definitionId);
             }
         }
     }
@@ -638,8 +1012,9 @@ void ondaFree(World* inWorld, void* /*inUserData*/, struct sc_msg_iter* args, vo
         return;
     }
 
-    std::memset(cmdData, 0, sizeof(OndaFreeCmdData));
-    cmdData->hash = args->geti();
+    new (cmdData) OndaFreeCmdData{};
+    cmdData->definitionId = args->geti();
+    cmdData->generation = args->geti();
 
     DoAsynchronousCommand(
         inWorld,
@@ -656,52 +1031,46 @@ void ondaFree(World* inWorld, void* /*inUserData*/, struct sc_msg_iter* args, vo
 
 } // namespace
 
-CompiledProgram* Onda::getProgramByHash(int hash) {
-    for (const auto& entry : patchStorage) {
-        if (entry.active && entry.hash == hash) {
-            return entry.program;
-        }
-    }
-
-    return nullptr;
+CompiledProgram* Onda::getProgramById(int definitionId) {
+    const PatchEntry* entry = patchEntryForDefinition(definitionId);
+    return entry ? entry->program : nullptr;
 }
 
-CompiledProgram* Onda::insertOrUpdateProgram(int hash, CompiledProgram* program) {
-    for (auto& entry : patchStorage) {
-        if (entry.active && entry.hash == hash) {
-            CompiledProgram* old = entry.program;
-            entry.program = program;
-            return old;
-        }
+void Onda::observeGeneration(int definitionId, int generation) {
+    PatchEntry* entry = patchEntryForDefinition(definitionId);
+    if (entry && generation > entry->generation) {
+        entry->generation = generation;
     }
-
-    for (auto& entry : patchStorage) {
-        if (!entry.active) {
-            entry.hash = hash;
-            entry.program = program;
-            entry.active = true;
-            return nullptr;
-        }
-    }
-
-    Print(
-        "ERROR: Onda: patch storage is full (%d). Increase size in PluginLoad.\n",
-        static_cast<int>(patchStorage.size()));
-
-    return program;
 }
 
-CompiledProgram* Onda::removeProgram(int hash) {
-    for (auto& entry : patchStorage) {
-        if (entry.active && entry.hash == hash) {
-            entry.active = false;
-            CompiledProgram* old = entry.program;
-            entry.program = nullptr;
-            return old;
-        }
+ProgramPublishResult Onda::publishProgram(int definitionId, int generation, CompiledProgram* program) {
+    PatchEntry* entry = patchEntryForDefinition(definitionId);
+    if (!entry || generation < 1 || !program) {
+        return {ProgramPublishStatus::InvalidDefinition, nullptr};
+    }
+    if (generation <= entry->generation) {
+        return {ProgramPublishStatus::Stale, nullptr};
     }
 
-    return nullptr;
+    CompiledProgram* replaced = entry->program;
+    entry->generation = generation;
+    entry->program = program;
+    return {
+        replaced ? ProgramPublishStatus::Replaced : ProgramPublishStatus::Inserted,
+        replaced,
+    };
+}
+
+CompiledProgram* Onda::removeProgram(int definitionId, int generation) {
+    PatchEntry* entry = patchEntryForDefinition(definitionId);
+    if (!entry || generation < 1 || generation <= entry->generation) {
+        return nullptr;
+    }
+
+    entry->generation = generation;
+    CompiledProgram* old = entry->program;
+    entry->program = nullptr;
+    return old;
 }
 
 bool Onda::bindProgram(CompiledProgram* program, bool isHotSwap) {
@@ -713,8 +1082,8 @@ bool Onda::bindProgram(CompiledProgram* program, bool isHotSwap) {
     int claimedIndex = -1;
     if (!claimInstance(program, claimedInstance, claimedIndex)) {
         Print(
-            "ERROR: Onda (hash %d): preallocated instances exhausted. Increase OndaDef numAllocate.\n",
-            mHash);
+            "ERROR: Onda (definition %d): preallocated instances exhausted. Increase OndaDef numAllocate.\n",
+            mDefinitionId);
         return false;
     }
 
@@ -723,7 +1092,7 @@ bool Onda::bindProgram(CompiledProgram* program, bool isHotSwap) {
         : nullptr;
 
     if (expected != claimedInstance || !claimedInstance) {
-        Print("ERROR: Onda (hash %d, instance %d): invalid runtime instance claim state.\n", mHash, claimedIndex);
+        Print("ERROR: Onda (definition %d, instance %d): invalid runtime instance claim state.\n", mDefinitionId, claimedIndex);
         if (claimedIndex >= 0 && claimedIndex < static_cast<int>(program->instances.size())) {
             program->instances[static_cast<size_t>(claimedIndex)].unit = nullptr;
         }
@@ -731,7 +1100,7 @@ bool Onda::bindProgram(CompiledProgram* program, bool isHotSwap) {
     }
 
     if (onda_reset_instance_state(claimedInstance) != 0) {
-        Print("ERROR: Onda (hash %d, instance %d): failed to reset runtime instance.\n", mHash, claimedIndex);
+        Print("ERROR: Onda (definition %d, instance %d): failed to reset runtime instance.\n", mDefinitionId, claimedIndex);
         program->instances[static_cast<size_t>(claimedIndex)].unit = nullptr;
         return false;
     }
@@ -750,14 +1119,14 @@ bool Onda::bindProgram(CompiledProgram* program, bool isHotSwap) {
     mCalcFunc = make_calc_function<Onda, &Onda::next>();
 
     if (isHotSwap) {
-        Print("Onda (hash %d, instance %d): hot-swapped.\n", mHash, mInstanceSlot);
+        Print("Onda (definition %d, instance %d): hot-swapped.\n", mDefinitionId, mInstanceSlot);
     }
 
     return true;
 }
 
 bool Onda::bindLatestProgram(bool isHotSwap) {
-    CompiledProgram* latest = getProgramByHash(mHash);
+    CompiledProgram* latest = getProgramById(mDefinitionId);
     if (!latest) {
         return false;
     }
@@ -819,152 +1188,129 @@ bool Onda::allocateRtState(CompiledProgram* program, int instanceSlot) {
     int newBufferLockCount = 0;
 #endif
 
+    auto releasePendingState = [&] {
+        auto release = [&](auto*& pointer) {
+            if (pointer) {
+                RTFree(mWorld, pointer);
+                pointer = nullptr;
+            }
+        };
+
+        release(newAudioInputDescIndices);
+        release(newParamDescIndices);
+        release(newEventDescIndices);
+        release(newBufferDescIndices);
+        release(newScInputSlotByDesc);
+        release(newRuntimeInputs);
+        release(newRuntimeBuffers);
+        release(newRuntimeOutputs);
+        release(newOutputScratchBlock);
+#if SUPERNOVA
+        release(newBufferLocks);
+#endif
+    };
+
+    const int scInputCount = numInputs() - 1;
+    if (newBoundInputCount != scInputCount) {
+        Print(
+            "ERROR: Onda (definition %d, instance %d): program requires exactly %d SC inputs but UGen has %d. "
+            "Relaunch the UGen with the new IO shape.\n",
+            mDefinitionId,
+            instanceSlot,
+            newBoundInputCount,
+            scInputCount);
+        return false;
+    }
+
     if (newBoundInputCount > 0) {
         newScInputSlotByDesc = static_cast<int*>(RTAlloc(mWorld, static_cast<size_t>(newBoundInputCount) * sizeof(int)));
         if (!newScInputSlotByDesc) {
-            Print("ERROR: Onda (hash %d, instance %d): failed to allocate input slot map.\n", mHash, instanceSlot);
+            Print("ERROR: Onda (definition %d, instance %d): failed to allocate input slot map.\n", mDefinitionId, instanceSlot);
             return false;
         }
 
-        const int maxScSlots = numInputs() - 1;
         for (int i = 0; i < newBoundInputCount; ++i) {
-            newScInputSlotByDesc[i] = (i < maxScSlots) ? (i + 1) : -1;
+            newScInputSlotByDesc[i] = i + 1;
         }
 
-        if (newBoundInputCount != maxScSlots) {
-            Print(
-                "ERROR: Onda (hash %d, instance %d): program requires exactly %d SC inputs but UGen has %d. "
-                "Relaunch the UGen with the new IO shape.\n",
-                mHash,
-                instanceSlot,
-                newBoundInputCount,
-                maxScSlots);
-            RTFree(mWorld, newScInputSlotByDesc);
-            return false;
-        }
-
-        newRuntimeInputs = static_cast<RuntimeInputState*>(RTAlloc(mWorld, static_cast<size_t>(newBoundInputCount) * sizeof(RuntimeInputState)));
+        newRuntimeInputs = rtAllocateObjects<RuntimeInputState>(mWorld, newBoundInputCount);
         if (!newRuntimeInputs) {
-            Print("ERROR: Onda (hash %d, instance %d): failed to allocate input runtime state.\n", mHash, instanceSlot);
-            RTFree(mWorld, newScInputSlotByDesc);
+            Print("ERROR: Onda (definition %d, instance %d): failed to allocate input runtime state.\n", mDefinitionId, instanceSlot);
+            releasePendingState();
             return false;
         }
-        std::memset(newRuntimeInputs, 0, static_cast<size_t>(newBoundInputCount) * sizeof(RuntimeInputState));
-
-        newRuntimeBuffers = static_cast<RuntimeBufferState*>(RTAlloc(mWorld, static_cast<size_t>(newBoundInputCount) * sizeof(RuntimeBufferState)));
+        newRuntimeBuffers = rtAllocateObjects<RuntimeBufferState>(mWorld, newBoundInputCount);
         if (!newRuntimeBuffers) {
-            Print("ERROR: Onda (hash %d, instance %d): failed to allocate buffer runtime state.\n", mHash, instanceSlot);
-            RTFree(mWorld, newRuntimeInputs);
-            RTFree(mWorld, newScInputSlotByDesc);
+            Print("ERROR: Onda (definition %d, instance %d): failed to allocate buffer runtime state.\n", mDefinitionId, instanceSlot);
+            releasePendingState();
             return false;
         }
-        std::memset(newRuntimeBuffers, 0, static_cast<size_t>(newBoundInputCount) * sizeof(RuntimeBufferState));
+    }
+
+    if (program->requiredOutputChannels != numOutputs()) {
+        Print(
+            "ERROR: Onda (definition %d, instance %d): program requires exactly %d output channels but UGen has %d. "
+            "Relaunch the UGen with the new IO shape.\n",
+            mDefinitionId,
+            instanceSlot,
+            program->requiredOutputChannels,
+            numOutputs());
+        releasePendingState();
+        return false;
     }
 
     if (newBoundOutputCount > 0) {
-        newRuntimeOutputs = static_cast<RuntimeOutputState*>(RTAlloc(mWorld, static_cast<size_t>(newBoundOutputCount) * sizeof(RuntimeOutputState)));
+        newRuntimeOutputs = rtAllocateObjects<RuntimeOutputState>(mWorld, newBoundOutputCount);
         if (!newRuntimeOutputs) {
-            Print("ERROR: Onda (hash %d, instance %d): failed to allocate output runtime state.\n", mHash, instanceSlot);
-            if (newScInputSlotByDesc) {
-                RTFree(mWorld, newScInputSlotByDesc);
-            }
-            if (newRuntimeInputs) {
-                RTFree(mWorld, newRuntimeInputs);
-            }
-            if (newRuntimeBuffers) {
-                RTFree(mWorld, newRuntimeBuffers);
-            }
+            Print("ERROR: Onda (definition %d, instance %d): failed to allocate output runtime state.\n", mDefinitionId, instanceSlot);
+            releasePendingState();
             return false;
         }
-        std::memset(newRuntimeOutputs, 0, static_cast<size_t>(newBoundOutputCount) * sizeof(RuntimeOutputState));
-
         int usedScOuts = 0;
         size_t totalScratchBytes = 0;
         for (int i = 0; i < newBoundOutputCount; ++i) {
             const auto& outDesc = newBoundOutputs[i];
             auto& state = newRuntimeOutputs[i];
 
-            const bool canMap = (usedScOuts + outDesc.arrayLen) <= numOutputs();
-            state.mapped = canMap;
-            state.scOffset = canMap ? usedScOuts : -1;
-            state.directBind = canMap && outDesc.arrayLen == 1;
-            state.scratchBytes = state.directBind
-                ? 0
-                : static_cast<int>(sizeof(float) * static_cast<size_t>(outDesc.arrayLen) * static_cast<size_t>(bufferSize()));
+            state.scOffset = usedScOuts;
+            state.directBind = outDesc.arrayLen == 1;
+            usedScOuts += outDesc.arrayLen;
 
-            if (state.scratchBytes > 0) {
-                totalScratchBytes += static_cast<size_t>(state.scratchBytes);
-            }
-
-            if (canMap) {
-                usedScOuts += outDesc.arrayLen;
-                if (!state.directBind) {
-                    newNeedsOutputCopy = true;
+            if (!state.directBind) {
+                const size_t scratchBytes = sizeof(float)
+                    * static_cast<size_t>(outDesc.arrayLen)
+                    * static_cast<size_t>(bufferSize());
+                if (scratchBytes > static_cast<size_t>(std::numeric_limits<int>::max())
+                    || scratchBytes > std::numeric_limits<size_t>::max() - totalScratchBytes) {
+                    Print(
+                        "ERROR: Onda (definition %d, instance %d): output scratch layout exceeds the host limit.\n",
+                        mDefinitionId,
+                        instanceSlot);
+                    releasePendingState();
+                    return false;
                 }
+                state.scratchBytes = static_cast<int>(scratchBytes);
+                totalScratchBytes += scratchBytes;
+                newNeedsOutputCopy = true;
             }
-        }
-
-        if (program->requiredOutputChannels != numOutputs()) {
-            Print(
-                "ERROR: Onda (hash %d, instance %d): program requires exactly %d output channels but UGen has %d. "
-                "Relaunch the UGen with the new IO shape.\n",
-                mHash,
-                instanceSlot,
-                program->requiredOutputChannels,
-                numOutputs());
-            if (newScInputSlotByDesc) {
-                RTFree(mWorld, newScInputSlotByDesc);
-            }
-            if (newRuntimeInputs) {
-                RTFree(mWorld, newRuntimeInputs);
-            }
-            if (newRuntimeBuffers) {
-                RTFree(mWorld, newRuntimeBuffers);
-            }
-            if (newRuntimeOutputs) {
-                RTFree(mWorld, newRuntimeOutputs);
-            }
-            return false;
         }
 
         if (usedScOuts != program->requiredOutputChannels) {
             Print(
-                "ERROR: Onda (hash %d, instance %d): internal output mapping mismatch (%d mapped, %d required).\n",
-                mHash,
+                "ERROR: Onda (definition %d, instance %d): internal output mapping mismatch (%d mapped, %d required).\n",
+                mDefinitionId,
                 instanceSlot,
                 usedScOuts,
                 program->requiredOutputChannels);
-            if (newScInputSlotByDesc) {
-                RTFree(mWorld, newScInputSlotByDesc);
-            }
-            if (newRuntimeInputs) {
-                RTFree(mWorld, newRuntimeInputs);
-            }
-            if (newRuntimeBuffers) {
-                RTFree(mWorld, newRuntimeBuffers);
-            }
-            if (newRuntimeOutputs) {
-                RTFree(mWorld, newRuntimeOutputs);
-            }
+            releasePendingState();
             return false;
         }
 
         if (totalScratchBytes > 0) {
             newOutputScratchBlock = static_cast<uint8_t*>(RTAlloc(mWorld, totalScratchBytes));
             if (!newOutputScratchBlock) {
-                Print("ERROR: Onda (hash %d, instance %d): failed to allocate output scratch block.\n", mHash, instanceSlot);
-                if (newScInputSlotByDesc) {
-                    RTFree(mWorld, newScInputSlotByDesc);
-                }
-                if (newRuntimeInputs) {
-                    RTFree(mWorld, newRuntimeInputs);
-                }
-                if (newRuntimeBuffers) {
-                    RTFree(mWorld, newRuntimeBuffers);
-                }
-                if (newRuntimeOutputs) {
-                    RTFree(mWorld, newRuntimeOutputs);
-                }
+                Print("ERROR: Onda (definition %d, instance %d): failed to allocate output scratch block.\n", mDefinitionId, instanceSlot);
+                releasePendingState();
                 return false;
             }
             std::memset(newOutputScratchBlock, 0, totalScratchBytes);
@@ -991,27 +1337,12 @@ bool Onda::allocateRtState(CompiledProgram* program, int instanceSlot) {
     newBufferLockCapacity = bufferInputCount;
     newBufferLockCount = 0;
     if (newBufferLockCapacity > 0) {
-        newBufferLocks = static_cast<BufferLockState*>(RTAlloc(mWorld, static_cast<size_t>(newBufferLockCapacity) * sizeof(BufferLockState)));
+        newBufferLocks = rtAllocateObjects<BufferLockState>(mWorld, newBufferLockCapacity);
         if (!newBufferLocks) {
-            Print("ERROR: Onda (hash %d, instance %d): failed to allocate buffer lock state.\n", mHash, instanceSlot);
-            if (newScInputSlotByDesc) {
-                RTFree(mWorld, newScInputSlotByDesc);
-            }
-            if (newRuntimeInputs) {
-                RTFree(mWorld, newRuntimeInputs);
-            }
-            if (newRuntimeBuffers) {
-                RTFree(mWorld, newRuntimeBuffers);
-            }
-            if (newRuntimeOutputs) {
-                RTFree(mWorld, newRuntimeOutputs);
-            }
-            if (newOutputScratchBlock) {
-                RTFree(mWorld, newOutputScratchBlock);
-            }
+            Print("ERROR: Onda (definition %d, instance %d): failed to allocate buffer lock state.\n", mDefinitionId, instanceSlot);
+            releasePendingState();
             return false;
         }
-        std::memset(newBufferLocks, 0, static_cast<size_t>(newBufferLockCapacity) * sizeof(BufferLockState));
     }
 #endif
 
@@ -1036,7 +1367,7 @@ bool Onda::allocateRtState(CompiledProgram* program, int instanceSlot) {
 
         outPtr = static_cast<int*>(RTAlloc(mWorld, static_cast<size_t>(count) * sizeof(int)));
         if (!outPtr) {
-            Print("ERROR: Onda (hash %d, instance %d): failed to allocate %s index map.\n", mHash, instanceSlot, label);
+            Print("ERROR: Onda (definition %d, instance %d): failed to allocate %s index map.\n", mDefinitionId, instanceSlot, label);
             return false;
         }
 
@@ -1047,38 +1378,7 @@ bool Onda::allocateRtState(CompiledProgram* program, int instanceSlot) {
         || !allocateIndexMap(newParamDescCount, newParamDescIndices, "param")
         || !allocateIndexMap(newEventDescCount, newEventDescIndices, "event")
         || !allocateIndexMap(newBufferDescCount, newBufferDescIndices, "buffer")) {
-        if (newAudioInputDescIndices) {
-            RTFree(mWorld, newAudioInputDescIndices);
-        }
-        if (newParamDescIndices) {
-            RTFree(mWorld, newParamDescIndices);
-        }
-        if (newEventDescIndices) {
-            RTFree(mWorld, newEventDescIndices);
-        }
-        if (newBufferDescIndices) {
-            RTFree(mWorld, newBufferDescIndices);
-        }
-        if (newScInputSlotByDesc) {
-            RTFree(mWorld, newScInputSlotByDesc);
-        }
-        if (newRuntimeInputs) {
-            RTFree(mWorld, newRuntimeInputs);
-        }
-        if (newRuntimeBuffers) {
-            RTFree(mWorld, newRuntimeBuffers);
-        }
-        if (newRuntimeOutputs) {
-            RTFree(mWorld, newRuntimeOutputs);
-        }
-        if (newOutputScratchBlock) {
-            RTFree(mWorld, newOutputScratchBlock);
-        }
-#if SUPERNOVA
-        if (newBufferLocks) {
-            RTFree(mWorld, newBufferLocks);
-        }
-#endif
+        releasePendingState();
         return false;
     }
 
@@ -1211,8 +1511,8 @@ void Onda::releaseInstance() {
     mInstanceSlot = -1;
 }
 
-void Onda::handleHotSwap(int hash, CompiledProgram* program) {
-    if (hash != mHash || !program) {
+void Onda::handleHotSwap(int definitionId, CompiledProgram* program) {
+    if (definitionId != mDefinitionId || !program) {
         return;
     }
 
@@ -1222,8 +1522,8 @@ void Onda::handleHotSwap(int hash, CompiledProgram* program) {
 
     if (!bindProgram(program, true)) {
         Print(
-            "WARNING: Onda (hash %d, instance %d): hot-swap failed. Releasing current instance and silencing unit.\n",
-            mHash,
+            "WARNING: Onda (definition %d, instance %d): hot-swap failed. Releasing current instance and silencing unit.\n",
+            mDefinitionId,
             mInstanceSlot);
         releaseInstance();
         freeRtState();
@@ -1232,8 +1532,8 @@ void Onda::handleHotSwap(int hash, CompiledProgram* program) {
     }
 }
 
-void Onda::handleFree(int hash) {
-    if (hash != mHash) {
+void Onda::handleFree(int definitionId) {
+    if (definitionId != mDefinitionId) {
         return;
     }
 
@@ -1399,7 +1699,7 @@ Onda::BufferPrepResult Onda::prepareBuffers() {
         SndBuf* buf = resolveSndBufByIndex(bufIndex);
 
         if (isValidBufferBinding(buf, desc) && !addOrUpgradeBufferLock(buf, desc.bufferMayWrite)) {
-            Print("ERROR: Onda (hash %d, instance %d): buffer lock state capacity exceeded.\n", mHash, mInstanceSlot);
+            Print("ERROR: Onda (definition %d, instance %d): buffer lock state capacity exceeded.\n", mDefinitionId, mInstanceSlot);
             return BufferPrepResult::Fatal;
         }
     }
@@ -1421,13 +1721,36 @@ Onda::BufferPrepResult Onda::prepareBuffers() {
         auto& state = mRuntimeBuffers[i];
 
         const bool valid = isValidBufferBinding(buf, desc);
-        allValid = allValid && valid;
+        const bool useProjectDefault = !valid && desc.hasProjectDefault;
+        allValid = allValid && (valid || useProjectDefault);
+
+        if (useProjectDefault) {
+            if (state.bound) {
+                if (onda_reset_buffer_to_project_default(mInstance, desc.ondaIndex) != 0) {
+                    Print(
+                        "ERROR: Onda (definition %d, instance %d): failed to restore project buffer '%s'.\n",
+                        mDefinitionId,
+                        mInstanceSlot,
+                        desc.name.c_str());
+                    return BufferPrepResult::Fatal;
+                }
+                state.bound = false;
+                state.boundPtr = nullptr;
+                state.boundBufIndex = -1;
+                state.boundFrames = -1;
+                state.boundChannels = -1;
+                state.boundSampleRate = 0.0f;
+                mBindingsNeedValidate = true;
+            }
+            state.invalidReported = false;
+            continue;
+        }
 
         if (!valid && !state.invalidReported) {
             Print(
-                "WARNING: Onda (hash %d, instance %d): buffer '%s' is unavailable or incompatible (bufnum=%d); "
+                "WARNING: Onda (definition %d, instance %d): buffer '%s' is unavailable or incompatible (bufnum=%d); "
                 "outputting silence until valid.\n",
-                mHash,
+                mDefinitionId,
                 mInstanceSlot,
                 desc.name.c_str(),
                 bufIndex);
@@ -1440,8 +1763,8 @@ Onda::BufferPrepResult Onda::prepareBuffers() {
             if (state.bound) {
                 if (onda_bind_buffer(mInstance, desc.ondaIndex, nullptr, 0, 0, 0.0f, ONDA_PRIMITIVE_F32) != 0) {
                     Print(
-                        "ERROR: Onda (hash %d, instance %d): failed to unbind buffer '%s' (bufnum=%d).\n",
-                        mHash,
+                        "ERROR: Onda (definition %d, instance %d): failed to unbind buffer '%s' (bufnum=%d).\n",
+                        mDefinitionId,
                         mInstanceSlot,
                         desc.name.c_str(),
                         bufIndex);
@@ -1472,8 +1795,8 @@ Onda::BufferPrepResult Onda::prepareBuffers() {
         if (needsRebind) {
             if (onda_bind_buffer(mInstance, desc.ondaIndex, ptr, frames, channels, sampleRate, ONDA_PRIMITIVE_F32) != 0) {
                 Print(
-                    "ERROR: Onda (hash %d, instance %d): failed to bind buffer '%s' (bufnum=%d).\n",
-                    mHash,
+                    "ERROR: Onda (definition %d, instance %d): failed to bind buffer '%s' (bufnum=%d).\n",
+                    mDefinitionId,
                     mInstanceSlot,
                     desc.name.c_str(),
                     bufIndex);
@@ -1502,8 +1825,8 @@ bool Onda::prepareInputs() {
 
         if (!src) {
             Print(
-                "ERROR: Onda (hash %d, instance %d): missing bound audio input '%s'. Relaunch the UGen with the new IO shape.\n",
-                mHash,
+                "ERROR: Onda (definition %d, instance %d): missing bound audio input '%s'. Relaunch the UGen with the new IO shape.\n",
+                mDefinitionId,
                 mInstanceSlot,
                 desc.name.c_str());
             return false;
@@ -1515,7 +1838,7 @@ bool Onda::prepareInputs() {
         const bool needsRebind = !state.bound || state.boundPtr != bindPtr || state.boundBytes != bytes;
         if (needsRebind) {
             if (onda_bind_input(mInstance, desc.ondaIndex, bindPtr, bytes) != 0) {
-                Print("ERROR: Onda (hash %d, instance %d): failed to bind input '%s'.\n", mHash, mInstanceSlot, desc.name.c_str());
+                Print("ERROR: Onda (definition %d, instance %d): failed to bind input '%s'.\n", mDefinitionId, mInstanceSlot, desc.name.c_str());
                 return false;
             }
             state.bound = true;
@@ -1535,10 +1858,15 @@ bool Onda::prepareParamsAndEvents() {
         const int scSlot = mScInputSlotByDesc[i];
         const float fallback = desc.hasInit ? desc.init : 0.0f;
         const float value = (scSlot > 0) ? in0(scSlot) : fallback;
+        auto& state = mRuntimeInputs[i];
 
-        if (onda_set_param_by_index(mInstance, desc.ondaIndex, &value, static_cast<int>(sizeof(float))) != 0) {
-            Print("ERROR: Onda (hash %d, instance %d): failed to set param '%s'.\n", mHash, mInstanceSlot, desc.name.c_str());
-            return false;
+        if (!state.controlInitialized || state.previousControl != value) {
+            if (onda_set_param_by_index(mInstance, desc.ondaIndex, &value, static_cast<int>(sizeof(float))) != 0) {
+                Print("ERROR: Onda (definition %d, instance %d): failed to set param '%s'.\n", mDefinitionId, mInstanceSlot, desc.name.c_str());
+                return false;
+            }
+            state.previousControl = value;
+            state.controlInitialized = true;
         }
     }
 
@@ -1546,11 +1874,16 @@ bool Onda::prepareParamsAndEvents() {
         const int i = mEventDescIndices[n];
         const auto& desc = mBoundInputs[i];
         const int scSlot = mScInputSlotByDesc[i];
-        const float fallback = desc.hasInit ? desc.init : 0.0f;
-        const float value = (scSlot > 0) ? in0(scSlot) : fallback;
+        const float value = (scSlot > 0) ? in0(scSlot) : 0.0f;
+        auto& state = mRuntimeInputs[i];
+        const bool triggered = value > 0.0f
+            && (!state.controlInitialized || state.previousControl <= 0.0f);
+        state.previousControl = value;
+        state.controlInitialized = true;
 
-        if (onda_trigger_event_by_index(mInstance, desc.ondaIndex, &value, static_cast<int>(sizeof(float))) != 0) {
-            Print("ERROR: Onda (hash %d, instance %d): failed to trigger event '%s'.\n", mHash, mInstanceSlot, desc.name.c_str());
+        if (triggered
+            && onda_trigger_event_by_index(mInstance, desc.ondaIndex, &value, static_cast<int>(sizeof(float))) != 0) {
+            Print("ERROR: Onda (definition %d, instance %d): failed to trigger event '%s'.\n", mDefinitionId, mInstanceSlot, desc.name.c_str());
             return false;
         }
     }
@@ -1576,7 +1909,7 @@ bool Onda::prepareOutputs() {
         const bool needsRebind = !outState.bound || outState.boundPtr != ptr || outState.boundBytes != bytes;
         if (needsRebind) {
             if (onda_bind_output(mInstance, outDesc.ondaIndex, ptr, bytes) != 0) {
-                Print("ERROR: Onda (hash %d, instance %d): failed to bind output '%s'.\n", mHash, mInstanceSlot, outDesc.name.c_str());
+                Print("ERROR: Onda (definition %d, instance %d): failed to bind output '%s'.\n", mDefinitionId, mInstanceSlot, outDesc.name.c_str());
                 return false;
             }
             outState.bound = true;
@@ -1594,7 +1927,7 @@ void Onda::copyOutputsToSC(int nSamples) {
         const auto& outDesc = mBoundOutputs[i];
         auto& outState = mRuntimeOutputs[i];
 
-        if (!outState.mapped || outState.directBind) {
+        if (outState.directBind) {
             continue;
         }
 
@@ -1616,8 +1949,8 @@ void Onda::silenceBlockOutputs(int nSamples) {
 bool Onda::processAudio(int nSamples) {
     if (nSamples != bufferSize()) {
         Print(
-            "ERROR: Onda (hash %d, instance %d): invalid process size %d (compiled block size is %d).\n",
-            mHash,
+            "ERROR: Onda (definition %d, instance %d): invalid process size %d (compiled block size is %d).\n",
+            mDefinitionId,
             mInstanceSlot,
             nSamples,
             bufferSize());
@@ -1664,8 +1997,8 @@ bool Onda::processAudio(int nSamples) {
     if (mBindingsNeedValidate) {
         if (onda_prepare_unchecked_process(mInstance) != 0) {
             Print(
-                "ERROR: Onda (hash %d, instance %d): failed to prepare bindings for unchecked processing.\n",
-                mHash,
+                "ERROR: Onda (definition %d, instance %d): failed to prepare bindings for unchecked processing.\n",
+                mDefinitionId,
                 mInstanceSlot);
 #if SUPERNOVA
             releaseBufferLocks();
@@ -1682,7 +2015,7 @@ bool Onda::processAudio(int nSamples) {
 #endif
 
     if (processResult != 0) {
-        Print("ERROR: Onda (hash %d, instance %d): onda_process_unchecked failed.\n", mHash, mInstanceSlot);
+        Print("ERROR: Onda (definition %d, instance %d): onda_process_unchecked failed.\n", mDefinitionId, mInstanceSlot);
         return false;
     }
 
@@ -1694,7 +2027,7 @@ bool Onda::processAudio(int nSamples) {
 }
 
 Onda::Onda() {
-    mHash = static_cast<int>(in0(0));
+    mDefinitionId = definitionIdFromControl(in0(0));
 
     if (!bindLatestProgram(false)) {
         setSilence();
@@ -1712,11 +2045,13 @@ void Onda::setSilence() {
 
 void Onda::next(int nSamples) {
     if (!mInstance) {
+        silenceBlockOutputs(nSamples);
         setSilence();
         return;
     }
 
     if (!processAudio(nSamples)) {
+        silenceBlockOutputs(nSamples);
         setSilence();
     }
 }
@@ -1728,8 +2063,9 @@ void Onda::nextSilence(int nSamples) {
 PluginLoad(OndaUGens) {
     ft = inTable;
     registerUnit<Onda>(ft, "Onda", true); // Onda assumes no aliasing between buffers
+    Print("OndaCollider: using Onda %s.\n", ONDACOLLIDER_ONDA_VERSION);
 
-    Onda::patchStorage.resize(kPatchStorageCapacity);
+    Onda::patchStorage.resize(kMaxDefinitionId);
 
     ft->fDefinePlugInCmd("onda_compile", ondaCompile, nullptr);
     ft->fDefinePlugInCmd("onda_free", ondaFree, nullptr);

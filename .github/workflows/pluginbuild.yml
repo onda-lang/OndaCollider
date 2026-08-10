@@ -52,7 +52,9 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libasound2-dev libsndfile1-dev libgtk-3-dev libwebkit2gtk-4.0-dev
+        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          jackd2 libasound2-dev libsndfile1-dev libgtk-3-dev libwebkit2gtk-4.0-dev \
+          supercollider-language supercollider-server
 
     - name: Fetch Onda SDK (Unix)
       if: runner.os != 'Windows'
@@ -82,6 +84,13 @@ jobs:
       env:
         CMAKE_BUILD_PARALLEL_LEVEL: 4
       run: cmake --build "$BUILD_PATH" --config Release
+
+    - name: Test Linux Runtime
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        jackd -d dummy -r 48000 -p 1024 > /tmp/onda-jackd.log 2>&1 &
+        ctest --test-dir "$BUILD_PATH" --output-on-failure
 
     - name: Install
       shell: bash

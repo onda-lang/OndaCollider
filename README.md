@@ -68,12 +68,30 @@ Supported SDK asset patterns:
 
 For usage and examples, check the `OndaDef` and `Onda` help files.
 
+`OndaDef` accepts both `.onda` source files and self-contained `.ondaproject` manifests:
+
+```supercollider
+OndaDef(\project, "/path/to/project.ondaproject").send;
+```
+
+Project source files and file-backed assets are loaded relative to the manifest. Project buffer
+assets become the runtime defaults. An `f32` project buffer can still be overridden by passing an
+SC `Buffer` number to `Onda.ar`; omit it (or pass `-1`) to use the project asset.
+
+Buffer arrays have no corresponding SuperCollider endpoint. They are accepted only when loading an
+`.ondaproject`, are omitted from `OndaDef.ins`, and always retain their project-provided assets (or
+Onda's neutral default for an unbound array slot).
+
 Current constraints:
 
 - `ins` and `params` must use `f32` endpoint types for SC integration.
-- `events` must use a single `f32` payload (one control argument per event endpoint).
+- `events` must use a single `f32` payload (one control argument per event endpoint). They follow
+  SC trigger semantics: a transition from non-positive to positive fires once, and the positive
+  edge value becomes the payload. Onda event parameter defaults do not replace the idle SC value.
 - `outs` must use `f32` endpoint types (`f32` or `f32[N]`, flattened to SC channels).
-- Only `buffer[f32...]` endpoints are supported for SC integration.
+- SC `Buffer` overrides support `buffer<f32...>` endpoints. Project-owned buffers may use any Onda
+  primitive element type.
+- Buffer arrays require an `.ondaproject` and cannot be overridden from SuperCollider.
 - Missing or incompatible SC buffers are unbound from Onda, and the UGen outputs silence until every required buffer is valid and rebound.
 
 ## Examples
@@ -84,3 +102,15 @@ Current constraints:
 - `examples/svf.scd`
 - `examples/syncGranulator.scd`
 - `examples/syncGranulatorDual.scd`
+- `examples/project/project.scd`
+
+## Tests
+
+On Linux, after building, run the headless scsynth integration suite with:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+The suite exercises source and project compilation, buffer defaults and overrides, buffer-array
+constraints, event edges, definition ordering, and invalid-buffer silence.

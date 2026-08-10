@@ -27,6 +27,7 @@ struct OndaInputDescriptor {
     int bufferChannelsKind = -1;
     int bufferChannelsStatic = -1;
     bool bufferMayWrite = false;
+    bool hasProjectDefault = false;
 };
 
 struct CompiledProgram {
@@ -41,13 +42,23 @@ struct CompiledProgram {
     std::vector<PreallocatedInstance> instances;
     int requiredInputChannels = 0;
     int requiredOutputChannels = 0;
-    int outputChannels = 0;
 };
 
 struct PatchEntry {
-    int hash = 0;
+    int generation = 0;
     CompiledProgram* program = nullptr;
-    bool active = false;
+};
+
+enum class ProgramPublishStatus : uint8_t {
+    Inserted,
+    Replaced,
+    Stale,
+    InvalidDefinition,
+};
+
+struct ProgramPublishResult {
+    ProgramPublishStatus status = ProgramPublishStatus::InvalidDefinition;
+    CompiledProgram* replacedProgram = nullptr;
 };
 
 class Onda : public SCUnit {
@@ -57,12 +68,13 @@ public:
 
     static std::vector<PatchEntry> patchStorage;
 
-    static CompiledProgram* getProgramByHash(int hash);
-    static CompiledProgram* insertOrUpdateProgram(int hash, CompiledProgram* program);
-    static CompiledProgram* removeProgram(int hash);
+    static CompiledProgram* getProgramById(int definitionId);
+    static void observeGeneration(int definitionId, int generation);
+    static ProgramPublishResult publishProgram(int definitionId, int generation, CompiledProgram* program);
+    static CompiledProgram* removeProgram(int definitionId, int generation);
 
-    void handleHotSwap(int hash, CompiledProgram* program);
-    void handleFree(int hash);
+    void handleHotSwap(int definitionId, CompiledProgram* program);
+    void handleFree(int definitionId);
     void setSilence();
 
 private:
@@ -73,7 +85,6 @@ private:
     };
 
     struct RuntimeOutputState {
-        bool mapped = false;
         int scOffset = -1;
         bool directBind = false;
         uint8_t* scratch = nullptr;
@@ -86,7 +97,9 @@ private:
     struct RuntimeInputState {
         const void* boundPtr = nullptr;
         int boundBytes = 0;
+        float previousControl = 0.0f;
         bool bound = false;
+        bool controlInitialized = false;
     };
 
     struct RuntimeBufferState {
@@ -131,7 +144,7 @@ private:
     void next(int nSamples);
     void nextSilence(int nSamples);
 
-    int mHash = 0;
+    int mDefinitionId = 0;
     int mInstanceSlot = -1;
     onda_instance_t* mInstance = nullptr;
     CompiledProgram* mProgram = nullptr;

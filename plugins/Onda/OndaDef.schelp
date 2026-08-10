@@ -4,9 +4,7 @@ categories:: UGens>Onda
 related:: Classes/Onda
 
 DESCRIPTION::
-OndaDef manages compile and lifetime commands for link::Classes/Onda:: programs running on the SuperCollider server.
-
-This first scaffold mirrors CmajorCollider workflow:
+OndaDef manages compile and lifetime commands for link::Classes/Onda:: programs and projects running on the SuperCollider server.
 
 code::
 OndaDef(\name, sourceOrPath).send;
@@ -17,9 +15,10 @@ Current host limits:
 list::
 ## `ins`, `params`, and `events` must be scalar.
 ## `ins` and `params` must use `f32` endpoint types.
-## `events` must use a single `f32` payload.
+## `events` must use a single `f32` payload and follow SC positive-edge trigger semantics.
 ## `outs` must use `f32` endpoint types (`f32` or `f32[N]`).
-## `buffers` must be `buffer[f32...]` and are driven from control-rate `bufnum` inputs.
+## SC buffer overrides must be `buffer<f32...>` and are driven from control-rate `bufnum` inputs. Project-owned buffers may use any Onda primitive element type.
+## Buffer arrays require an `.ondaproject`, are omitted from `ins`, and cannot be overridden from SuperCollider.
 ::
 
 CLASSMETHODS::
@@ -29,7 +28,7 @@ Create a new Onda definition.
 ARGUMENT:: key
 Unique link::Classes/Symbol:: for this definition.
 ARGUMENT:: source
-Inline Onda source string, `.onda` file path string.
+Inline Onda source string, `.onda` file path, or `.ondaproject` manifest path. Project files and assets must be contained below the manifest's directory.
 
 METHOD:: free
 Free a specific definition by key.
@@ -56,6 +55,15 @@ Unload this definition on the server.
 
 METHOD:: query
 Post cached input/output metadata.
+
+METHOD:: id
+Collision-free server definition id retained for the lifetime of the sclang process.
+
+METHOD:: generation
+Latest compile/free generation sent for this definition key. Generations prevent stale asynchronous compiles from replacing newer requests.
+
+METHOD:: numAllocate
+Number of runtime instances requested by the latest send.
 
 METHOD:: ins
 Parsed input metadata array.

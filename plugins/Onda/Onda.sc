@@ -1,75 +1,150 @@
 OndaDef {
-	classvar <all;
+	classvar <all, <definitionIds, <generations;
+	classvar nextDefinitionId;
 
 	var <key;
-	var <hash;
-	var <numAllocate;
+	var <id;
+	var <generation;
+	var <>numAllocate;
 	var <source;
-	var <tmpFile;
+	var sourcePath;
 
 	var <ins;
 	var <outs;
 
 	*initClass {
 		all = IdentityDictionary.new;
+		definitionIds = IdentityDictionary.new;
+		generations = IdentityDictionary.new;
+		nextDefinitionId = 0;
 	}
 
 	*new { |key, source|
 		^super.new.init(key, source);
 	}
 
+	*definitionIdFor { |key|
+		var symbol = key.asSymbol;
+		var definitionId = definitionIds[symbol];
+
+		if(definitionId.isNil) {
+			if(nextDefinitionId >= 65536) {
+				Error("OndaDef: Definition id limit (65536) reached.").throw;
+			};
+
+			nextDefinitionId = nextDefinitionId + 1;
+			definitionId = nextDefinitionId;
+			definitionIds.put(symbol, definitionId);
+			generations.put(symbol, 0);
+		};
+
+		^definitionId
+	}
+
+	*nextGenerationFor { |key|
+		var symbol = key.asSymbol;
+		var next = (generations[symbol] ? 0) + 1;
+
+		// Definition ids and generations cross the UGen boundary as exactly
+		// representable f32 integers.
+		if(next > 16777215) {
+			Error("OndaDef: Generation limit reached for '%'.".format(symbol)).throw;
+		};
+
+		generations.put(symbol, next);
+		^next
+	}
+
 	init { |argKey, argSource|
-		var tmpFileCtr = 0;
-		var src, srcPath, isOndaPath;
+		var src, srcPath, isSourcePath;
 
 		key = argKey.asSymbol;
-
-		hash = (key.hash.abs & 0xFFFFFF).asInteger;
+		id = this.class.definitionIdFor(key);
 
 		src = argSource.asString;
 		srcPath = PathName(src);
-		isOndaPath = srcPath.extension.contains("onda");
+		isSourcePath = [\onda, \ondaproject].includes(srcPath.extension.asString.toLower.asSymbol);
 
-		if(isOndaPath) {
+		if(isSourcePath) {
 			var fullPath = srcPath.fullPath;
 			if(File.exists(fullPath)) {
+				sourcePath = fullPath;
 				source = fullPath;
 			} {
 				"Invalid path: '%'".format(fullPath).error;
 				^this;
 			}
 		} {
-			tmpFile = PathName.tmp ++ key.asString ++ tmpFileCtr.asString ++ ".onda";
-			File.use(tmpFile, "w", { |f|
-				f.write(src);
-			});
-			source = tmpFile;
+			source = src;
 		};
 	}
 
 	send { |server, action, numAllocate = 32|
+		var allocateCount = numAllocate.asInteger;
+		var compileGeneration;
+
 		server = server ? Server.default;
-		if(server.serverRunning) {
+		if(source.isNil) {
+			"OndaDef '%': No valid source to send.".format(key).error;
+			^this
+		};
+		if((allocateCount < 1) or: { allocateCount > 4096 }) {
+			"OndaDef '%': numAllocate must be between 1 and 4096.".format(key).error;
+			^this
+		};
+		if(server.serverRunning.not) {
+			"OndaDef: Server not running. Definition not sent.".warn;
+			^this
+		};
+
+		compileGeneration = this.class.nextGenerationFor(key);
+		generation = compileGeneration;
+		this.numAllocate_(allocateCount);
+
+		forkIfNeeded {
 			var cond = Condition(false);
-			var oscFunc = OSCFunc.newMatching({ | msg, time, addr |
+			var compilePath = sourcePath;
+			var temporaryPath;
+			var compileSucceeded = false;
+			var oscFunc;
+
+			protect {
+				if(compilePath.isNil) {
+					temporaryPath = PathName.tmp +/+ ("onda-" ++ UniqueID.next ++ ".onda");
+					File.use(temporaryPath, "w", { |file| file.write(source) });
+					compilePath = temporaryPath;
+				};
+
+				oscFunc = OSCFunc.newMatching({ |msg, time, addr|
 				var rawStr = msg.last.asString;
 				var parts = rawStr.split($/);
 
 				if(parts[0].asSymbol == \_onda) {
-					var replyHash = parts[1].asInteger;
-					if(hash == replyHash) {
-						var success = parts.last.asSymbol != \_fail;
+					var replyId = parts[1].asInteger;
+					var replyGeneration = parts[2].asInteger;
+
+					if((id == replyId) and: { compileGeneration == replyGeneration }) {
+						var success = parts[3].asSymbol != \_fail;
 						if (success) {
-							var numIns = parts[2].asInteger;
-							var cursor = 3;
+							var numIns = parts[3].asInteger;
+							var cursor = 4;
 
-							ins = [];
+							ins = Array.newClear(numIns);
 
-							numIns.do({
+							numIns.do({ |inputIndex|
 								var name = parts[cursor].asSymbol;
 								var rateInt = parts[cursor + 1].asInteger;
+								var kindInt = parts[cursor + 2].asInteger;
+								var hasInit = parts[cursor + 3].asInteger != 0;
 								var rateSym;
-								var meta = ();
+								var meta = (
+									kind: case
+									{ kindInt == 0 } { \input }
+									{ kindInt == 1 } { \param }
+									{ kindInt == 2 } { \event }
+									{ kindInt == 3 } { \buffer }
+									{ \input }
+								);
 
 								if (rateInt == 0) {
 									rateSym = \audio;
@@ -77,45 +152,19 @@ OndaDef {
 									rateSym = \control;
 								};
 
-								cursor = cursor + 2;
+								if(hasInit) { meta[\init] = parts[cursor + 4].asFloat };
+								cursor = cursor + 5;
 
-								while {
-									(cursor < (parts.size - 1)) && parts[cursor].asString.beginsWith("_")
-								} {
-									var tag = parts[cursor].asSymbol;
-									var val = parts[cursor + 1];
-
-									case
-									{ tag == \_init } { meta[\init] = val.asFloat }
-									{ tag == \_kind } {
-										var kindInt = val.asInteger;
-										meta[\kind] = if(kindInt == 0) {
-											\input
-										} {
-											if(kindInt == 1) {
-												\param
-											} {
-												if(kindInt == 2) {
-													\event
-												} {
-													if(kindInt == 3) { \buffer } { \input };
-												};
-											};
-										};
-									};
-
-									cursor = cursor + 2;
-								};
-
-								ins = ins.add((
+								ins[inputIndex] = (
 									name: name,
 									rate: rateSym,
 									meta: meta
-								));
+								);
 							});
 
 							outs = parts.last.asInteger;
 							all.put(key, this);
+							compileSucceeded = true;
 
 							"OndaDef: Compilation of '%' succeeded.".format(key).postln;
 						} {
@@ -125,30 +174,23 @@ OndaDef {
 						cond.unhang;
 					};
 				};
-			}, '/done', server.addr);
+				}, '/done', server.addr);
 
-			forkIfNeeded {
-				var msg = ["/cmd", "onda_compile", hash, numAllocate.asInteger, source];
-
-				server.sendMsg(*msg);
+				server.sendMsg(
+					"/cmd", "onda_compile", id, compileGeneration, allocateCount, compilePath);
 				cond.hang;
-
-				if(tmpFile.notNil) {
-					if(File.delete(tmpFile).not) {
-						"OndaDef: Could not delete temp file %".format(tmpFile).warn;
+			} {
+				if(oscFunc.notNil) { oscFunc.free };
+				if(temporaryPath.notNil) {
+					if(File.delete(temporaryPath).not) {
+						"OndaDef: Could not delete temp file %".format(temporaryPath).warn;
 					};
-					tmpFile = nil;
 				};
+			};
 
-				oscFunc.free;
-
-				if(action.notNil.and(outs.notNil)) {
-					action.value(this);
-				}
-			}
-
-		} {
-			"OndaDef: Server not running. Definition not sent.".warn;
+			if(action.notNil.and(compileSucceeded)) {
+				action.value(this);
+			};
 		}
 	}
 
@@ -159,13 +201,14 @@ OndaDef {
 	free { |server|
 		server = server ? Server.default;
 		if(server.serverRunning) {
-			server.sendMsg("/cmd", "onda_free", hash);
+			generation = this.class.nextGenerationFor(key);
+			server.sendMsg("/cmd", "onda_free", id, generation);
 		};
 		all.removeAt(key);
 	}
 
 	*free { |key|
-		var def = OndaDef.all[key];
+		var def = OndaDef.all[key.asSymbol];
 		if (def.isOndaDef) {
 			def.free;
 		} {
@@ -174,17 +217,18 @@ OndaDef {
 	}
 
 	*freeAll {
-		all.do { |def| def.free };
+		all.values.copy.do { |def| def.free };
 		all.clear;
 	}
 
 	asString {
-		^(this.class.asString ++ "(" ++ key.asString ++ " : " ++ hash.asString ++ ")");
+		^(this.class.asString ++ "(" ++ key.asString ++ " : " ++ id.asString ++ ")");
 	}
 
 	query {
 		("\nKey: " ++ key).postln;
-		("Hash: " ++ hash).postln;
+		("Definition id: " ++ id).postln;
+		("Generation: " ++ generation).postln;
 		("Inputs: " ++ ins).postln;
 		("Outputs: " ++ outs).postln;
 	}
@@ -196,7 +240,7 @@ OndaDef {
 
 Onda : MultiOutUGen {
 	*ar { |def ... args|
-		var inputs = [];
+		var inputs;
 		var inputMap = nil;
 		var defKey = def;
 
@@ -212,6 +256,7 @@ Onda : MultiOutUGen {
 		if (args.size == 1 and: { args[0].isKindOf(Event) }) {
 			inputMap = args[0];
 		};
+		inputs = Array.newClear(def.ins.size);
 
 		def.ins.do { |in, i|
 			var name = in[\name];
@@ -264,14 +309,14 @@ Onda : MultiOutUGen {
 				};
 			};
 
-			inputs = inputs.add(val);
+			inputs[i] = val;
 		};
 
-		^this.multiNewList(['audio', def.hash, def.outs] ++ inputs);
+		^this.multiNewList(['audio', def.id, def.outs] ++ inputs);
 	}
 
-	init { |hash, numOutputs ... args|
-		inputs = [hash] ++ args;
+	init { |definitionId, numOutputs ... args|
+		inputs = [definitionId] ++ args;
 		^this.initOutputs(numOutputs, \audio);
 	}
 }

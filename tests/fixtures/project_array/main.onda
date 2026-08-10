@@ -1,0 +1,8 @@
+buffers:
+  bank: f32 {2}
+
+outs:
+  out1
+
+sample:
+  out1 = 0.0

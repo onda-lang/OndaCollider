@@ -1,0 +1,9 @@
+buffers:
+  waveform: buffer<f32>
+  offset: buffer<i32>
+
+outs:
+  out1
+
+sample:
+  out1 = waveform[0] + f32(offset[0])

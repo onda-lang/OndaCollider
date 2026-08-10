@@ -1,0 +1,21 @@
+{
+  "entry": "main.onda",
+  "buffers": {
+    "waveform": {
+      "inline": {
+        "element": "f32",
+        "channels": 1,
+        "sample_rate": 48000,
+        "values": [0.25]
+      }
+    },
+    "offset": {
+      "inline": {
+        "element": "i32",
+        "channels": 1,
+        "sample_rate": 48000,
+        "values": [7]
+      }
+    }
+  }
+}

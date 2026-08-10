@@ -1,0 +1,16 @@
+{
+  "entry": "main.onda",
+  "buffers": {
+    "bank": [
+      {
+        "inline": {
+          "element": "f32",
+          "channels": 1,
+          "sample_rate": 48000,
+          "values": [0.25]
+        }
+      },
+      null
+    ]
+  }
+}
