@@ -63,7 +63,7 @@ OndaDef {
 
 		src = argSource.asString;
 		srcPath = PathName(src);
-		isSourcePath = [\onda, \ondaproject].includes(srcPath.extension.asString.toLower.asSymbol);
+		isSourcePath = [\onda, \on, \ondaproject].includes(srcPath.extension.asString.toLower.asSymbol);
 
 		if(isSourcePath) {
 			var fullPath = srcPath.fullPath;

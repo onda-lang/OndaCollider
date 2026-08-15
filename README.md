@@ -68,7 +68,7 @@ Supported SDK asset patterns:
 
 For usage and examples, check the `OndaDef` and `Onda` help files.
 
-`OndaDef` accepts both `.onda` source files and self-contained `.ondaproject` manifests:
+`OndaDef` accepts `.onda`/`.on` source files and self-contained `.ondaproject` manifests:
 
 ```supercollider
 OndaDef(\project, "/path/to/project.ondaproject").send;

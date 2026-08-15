@@ -19,7 +19,7 @@ server.waitForBoot {
     Routine({
         var assert, assertClose, compile, readBus;
         var ids, stableA, stableB;
-        var dualDef, dualSynth, replacementDualSynth;
+        var aliasDef, dualDef, dualSynth, replacementDualSynth;
         var eventDef, eventBus, eventSynth;
         var projectDef, projectBus, projectSynth, overrideBuffer, done;
         var arrayDef, badArrayDef, invalidDef;
@@ -55,6 +55,9 @@ server.waitForBoot {
             stableA = OndaDef(\stableId, "outs:\n  out1\nsample:\n  out1 = 0.0");
             stableB = OndaDef(\stableId, "outs:\n  out1\nsample:\n  out1 = 1.0");
             assert.(stableA.id == stableB.id, "a key must retain its definition id");
+
+            aliasDef = compile.(\sourceAlias, fixtures +/+ "source_alias.on");
+            assert.(aliasDef.outs == 1, ".on source files should compile through Onda's filesystem entry point");
 
             dualDef = compile.(\dualOsc, root +/+ "examples" +/+ "dualOsc.onda");
             assert.(dualDef.outs == 2, "dual oscillator should expose two outputs");

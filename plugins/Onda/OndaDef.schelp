@@ -28,7 +28,7 @@ Create a new Onda definition.
 ARGUMENT:: key
 Unique link::Classes/Symbol:: for this definition.
 ARGUMENT:: source
-Inline Onda source string, `.onda` file path, or `.ondaproject` manifest path. Project files and assets must be contained below the manifest's directory.
+Inline Onda source string, `.onda`/`.on` file path, or `.ondaproject` manifest path.
 
 METHOD:: free
 Free a specific definition by key.

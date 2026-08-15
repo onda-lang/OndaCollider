@@ -6,7 +6,7 @@ related:: Classes/OndaDef
 DESCRIPTION::
 Onda runs a compiled link::Classes/OndaDef::.
 
-Runtime processing uses the Onda native API with hot-swap and metadata-driven input/output mapping. Definitions may load an `.onda` source or a self-contained `.ondaproject` manifest.
+Runtime processing uses the Onda native API with hot-swap and metadata-driven input/output mapping. Definitions may load an `.onda`/`.on` source or a self-contained `.ondaproject` manifest.
 
 Current host limits:
 

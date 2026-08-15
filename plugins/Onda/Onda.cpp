@@ -7,14 +7,12 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <memory>
 #include <new>
 #include <sstream>
 #include <string>
 #include <type_traits>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -28,18 +26,6 @@ constexpr int kMaxReplySize = 4096;
 constexpr int kMaxDefinitionId = 65536;
 constexpr int kMaxPreallocatedInstances = 4096;
 constexpr size_t kMaxPathBytes = 16384;
-// Mirror Onda 0.7's editable-project transport limits so oversized snapshots are
-// rejected before the host allocates their contents.
-constexpr uintmax_t kMiB = UINTMAX_C(1024) * UINTMAX_C(1024);
-constexpr uintmax_t kMaxProjectDocuments = 4096;
-constexpr uintmax_t kMaxProjectAssets = 4096;
-constexpr uintmax_t kOndaBufferHeaderBytes = 64;
-constexpr uintmax_t kMaxProjectFileCount = kMaxProjectDocuments + kMaxProjectAssets + 1;
-constexpr uintmax_t kMaxProjectFileBytes = UINTMAX_C(1024) * kMiB + kOndaBufferHeaderBytes;
-constexpr uintmax_t kMaxProjectTotalBytes = UINTMAX_C(64) * kMiB
-    + UINTMAX_C(64) * kMiB
-    + UINTMAX_C(2048) * kMiB
-    + kMaxProjectAssets * kOndaBufferHeaderBytes;
 
 class ScopedOndaDiagnostic {
 public:
@@ -51,8 +37,6 @@ public:
 
     onda_diag_t* get() { return &mDiagnostic; }
     onda_diag_t* operator->() { return &mDiagnostic; }
-
-    void reset() { onda_diag_dispose(&mDiagnostic); }
 
 private:
     onda_diag_t mDiagnostic{};
@@ -76,14 +60,6 @@ T* rtAllocateObjects(World* world, int count) {
     return objects;
 }
 
-struct ProjectFileStorage {
-    std::filesystem::path absolutePath;
-    std::string relativePath;
-    uintmax_t expectedBytes = 0;
-    std::filesystem::file_time_type expectedWriteTime;
-    std::vector<uint8_t> bytes;
-};
-
 std::string lowercaseAscii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -95,150 +71,12 @@ bool isProjectPath(const std::filesystem::path& path) {
     return lowercaseAscii(path.extension().u8string()) == ".ondaproject";
 }
 
-bool readProjectFile(
-    ProjectFileStorage& file,
-    std::string& error) {
-    if (file.expectedBytes > static_cast<uintmax_t>(std::numeric_limits<size_t>::max())
-        || file.expectedBytes > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
-        error = "Project file is too large for this host: '" + file.absolutePath.u8string() + "'.";
-        return false;
-    }
-
-    std::ifstream stream(file.absolutePath, std::ios::binary);
-    if (!stream) {
-        error = "Failed to open project file '" + file.absolutePath.u8string() + "'.";
-        return false;
-    }
-
-    file.bytes.resize(static_cast<size_t>(file.expectedBytes));
-    if (!file.bytes.empty()) {
-        stream.read(
-            reinterpret_cast<char*>(file.bytes.data()),
-            static_cast<std::streamsize>(file.bytes.size()));
-        if (stream.gcount() != static_cast<std::streamsize>(file.bytes.size())) {
-            error = "Project file changed while being read: '" + file.absolutePath.u8string() + "'.";
-            return false;
-        }
-    }
-
-    std::error_code ec;
-    const uintmax_t finalBytes = std::filesystem::file_size(file.absolutePath, ec);
-    if (ec
-        || finalBytes != file.expectedBytes
-        || std::filesystem::last_write_time(file.absolutePath, ec) != file.expectedWriteTime
-        || ec) {
-        error = "Project file changed while taking the compile snapshot: '"
-            + file.absolutePath.u8string() + "'.";
-        return false;
-    }
-
-    return true;
-}
-
 PatchEntry* patchEntryForDefinition(int definitionId) {
     if (definitionId < 1 || definitionId > static_cast<int>(Onda::patchStorage.size())) {
         return nullptr;
     }
 
     return &Onda::patchStorage[static_cast<size_t>(definitionId - 1)];
-}
-
-onda_program_t* compileProjectFile(
-    const std::filesystem::path& manifestPath,
-    const onda_compile_options_t& compileOptions,
-    std::unordered_set<std::string>& projectBufferDefaults,
-    ScopedOndaDiagnostic& diag,
-    std::string& error) {
-    std::error_code ec;
-    const std::filesystem::path canonicalManifest = std::filesystem::canonical(manifestPath, ec);
-    if (ec) {
-        error = "Failed to resolve Onda project '" + manifestPath.u8string() + "': " + ec.message();
-        return nullptr;
-    }
-
-    const std::filesystem::path projectRoot = canonicalManifest.parent_path();
-    std::vector<ProjectFileStorage> storage;
-    uintmax_t totalBytes = 0;
-
-    try {
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(projectRoot)) {
-            if (entry.is_symlink() || !entry.is_regular_file()) {
-                continue;
-            }
-
-            if (storage.size() >= kMaxProjectFileCount) {
-                error = "Onda project contains too many files.";
-                return nullptr;
-            }
-
-            ProjectFileStorage file;
-            file.absolutePath = entry.path();
-            file.relativePath = entry.path().lexically_relative(projectRoot).generic_u8string();
-            file.expectedBytes = entry.file_size();
-            file.expectedWriteTime = entry.last_write_time();
-            if (file.expectedBytes > kMaxProjectFileBytes) {
-                error = "Onda project file exceeds the transport limit: '" + file.relativePath + "'.";
-                return nullptr;
-            }
-            if (file.expectedBytes > kMaxProjectTotalBytes - totalBytes) {
-                error = "Onda project exceeds the aggregate transport limit.";
-                return nullptr;
-            }
-            totalBytes += file.expectedBytes;
-            storage.push_back(std::move(file));
-        }
-    } catch (const std::filesystem::filesystem_error& filesystemError) {
-        error = "Failed to read Onda project directory '" + projectRoot.u8string() + "': "
-            + filesystemError.what();
-        return nullptr;
-    }
-
-    std::sort(storage.begin(), storage.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.relativePath < rhs.relativePath;
-    });
-
-    for (auto& file : storage) {
-        if (!readProjectFile(file, error)) {
-            return nullptr;
-        }
-    }
-
-    std::vector<onda_project_file_t> files;
-    files.reserve(storage.size());
-    for (const auto& file : storage) {
-        files.push_back({
-            file.relativePath.c_str(),
-            file.bytes.empty() ? nullptr : file.bytes.data(),
-            file.bytes.size(),
-        });
-    }
-
-    const std::string selectedManifest = canonicalManifest.lexically_relative(projectRoot).generic_u8string();
-    onda_project_image_t* rawImage = onda_project_image_load_files(
-        files.data(),
-        files.size(),
-        selectedManifest.c_str(),
-        diag.get());
-    if (!rawImage) {
-        return nullptr;
-    }
-    std::unique_ptr<onda_project_image_t, decltype(&onda_project_image_destroy)> image(
-        rawImage,
-        onda_project_image_destroy);
-
-    const int bufferCount = onda_project_image_buffer_count(image.get());
-    if (bufferCount < 0) {
-        error = "Failed to query buffer bindings from Onda project image.";
-        return nullptr;
-    }
-    for (int i = 0; i < bufferCount; ++i) {
-        if (const char* name = onda_project_image_buffer_name(image.get(), i)) {
-            projectBufferDefaults.emplace(name);
-        }
-    }
-
-    diag.reset();
-    return onda_project_image_compile(image.get(), &compileOptions, diag.get());
 }
 
 const char* inputKindToTag(OndaInputKind kind) {
@@ -302,7 +140,6 @@ void destroyCompiledProgram(CompiledProgram* program) {
 bool buildProgramMetadata(
     CompiledProgram& compiled,
     bool compiledFromProject,
-    const std::unordered_set<std::string>& projectBufferDefaults,
     std::string& error) {
     if (!compiled.program) {
         error = "Compiled program handle is null.";
@@ -514,7 +351,6 @@ bool buildProgramMetadata(
 
         const char* rawName = onda_buffer_name(compiled.program, i);
         const std::string name = rawName ? rawName : ("buffer" + std::to_string(i + 1));
-        const bool hasProjectDefault = projectBufferDefaults.find(name) != projectBufferDefaults.end();
         const int elemType = onda_buffer_elem_type(compiled.program, i);
         if (elemType != ONDA_PRIMITIVE_F32) {
             if (compiledFromProject) {
@@ -566,11 +402,10 @@ bool buildProgramMetadata(
         desc.elemBytes = static_cast<int>(sizeof(float));
         desc.arrayLen = 1;
         desc.hasInit = true;
-        desc.init = hasProjectDefault ? -1.0f : 0.0f;
+        desc.init = 0.0f;
         desc.bufferChannelsKind = channelsKind;
         desc.bufferChannelsStatic = channelsStatic;
         desc.bufferMayWrite = (mayWrite > 0);
-        desc.hasProjectDefault = hasProjectDefault;
 
         compiled.inputs.push_back(std::move(desc));
     }
@@ -622,6 +457,28 @@ bool buildProgramMetadata(
         }
         compiled.requiredOutputChannels += arrayLen;
         compiled.outputs.push_back(std::move(outDesc));
+    }
+
+    return true;
+}
+
+bool discoverProjectBufferDefaults(
+    CompiledProgram& compiled,
+    onda_instance_t* instance,
+    std::string& error) {
+    for (auto& desc : compiled.inputs) {
+        if (desc.kind != OndaInputKind::Buffer) {
+            continue;
+        }
+
+        const int result = onda_reset_buffer_to_project_default(instance, desc.ondaIndex);
+        if (result == 0) {
+            desc.hasProjectDefault = true;
+            desc.init = -1.0f;
+        } else if (result != -2) {
+            error = "Failed to query project default for buffer '" + desc.name + "'.";
+            return false;
+        }
     }
 
     return true;
@@ -790,45 +647,20 @@ bool ondaCompileStage2Impl(World* world, void* inUserData) {
         return true;
     }
 
-    const std::filesystem::path filePath = std::filesystem::u8path(cmdData->path);
-    std::error_code ec;
-    
-    const bool isFile = std::filesystem::exists(filePath, ec)
-            && std::filesystem::is_regular_file(filePath, ec);
-    
-    if (!isFile) {
-        Print("ERROR: Onda: failed to read source or project file '%s'.\n", cmdData->path);
-        writeFailureReply(*cmdData);
-        return true;
-    }
-
     onda_compile_options_t compileOptions{};
     compileOptions.fast_math = 0;
     compileOptions.sample_rate = static_cast<float>(world->mSampleRate);
     compileOptions.block_size = world->mBufLength;
 
     ScopedOndaDiagnostic diag;
-    std::string loadError;
-    std::unordered_set<std::string> projectBufferDefaults;
     std::unique_ptr<CompiledProgram, decltype(&destroyCompiledProgram)> compiled(
         new CompiledProgram(),
         destroyCompiledProgram);
-    const bool compiledFromProject = isProjectPath(filePath);
-    if (compiledFromProject) {
-        compiled->program = compileProjectFile(
-            filePath,
-            compileOptions,
-            projectBufferDefaults,
-            diag,
-            loadError);
-    } else {
-        compiled->program = onda_compile_file(cmdData->path, &compileOptions, nullptr, diag.get());
-    }
+    const bool compiledFromProject = isProjectPath(std::filesystem::u8path(cmdData->path));
+    compiled->program = onda_compile_file(cmdData->path, &compileOptions, nullptr, diag.get());
 
     if (!compiled->program) {
-        const char* message = !loadError.empty()
-            ? loadError.c_str()
-            : (diag->message ? diag->message : "unknown compile error");
+        const char* message = diag->message ? diag->message : "unknown compile error";
         const char* diagnosticFile = diag->file ? diag->file : cmdData->path;
         Print(
             "ERROR: Onda: compile failed in '%s' (%d:%d): %s\n",
@@ -841,7 +673,7 @@ bool ondaCompileStage2Impl(World* world, void* inUserData) {
     }
 
     std::string metaError;
-    if (!buildProgramMetadata(*compiled, compiledFromProject, projectBufferDefaults, metaError)) {
+    if (!buildProgramMetadata(*compiled, compiledFromProject, metaError)) {
         Print("ERROR: Onda: %s\n", metaError.c_str());
         writeFailureReply(*cmdData);
         return true;
@@ -868,6 +700,14 @@ bool ondaCompileStage2Impl(World* world, void* inUserData) {
         slot.instance = instance;
         slot.unit = nullptr;
         compiled->instances.push_back(slot);
+
+        if (i == 0
+            && compiledFromProject
+            && !discoverProjectBufferDefaults(*compiled, instance, metaError)) {
+            Print("ERROR: Onda: %s\n", metaError.c_str());
+            writeFailureReply(*cmdData);
+            return true;
+        }
     }
 
     std::string reply;
