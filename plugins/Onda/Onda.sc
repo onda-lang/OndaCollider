@@ -5,7 +5,6 @@ OndaDef {
 	var <key;
 	var <id;
 	var <generation;
-	var <>numAllocate;
 	var <source;
 	var sourcePath;
 
@@ -79,17 +78,12 @@ OndaDef {
 		};
 	}
 
-	send { |server, action, numAllocate = 32|
-		var allocateCount = numAllocate.asInteger;
+	send { |server, action|
 		var compileGeneration;
 
 		server = server ? Server.default;
 		if(source.isNil) {
 			"OndaDef '%': No valid source to send.".format(key).error;
-			^this
-		};
-		if((allocateCount < 1) or: { allocateCount > 4096 }) {
-			"OndaDef '%': numAllocate must be between 1 and 4096.".format(key).error;
 			^this
 		};
 		if(server.serverRunning.not) {
@@ -99,7 +93,6 @@ OndaDef {
 
 		compileGeneration = this.class.nextGenerationFor(key);
 		generation = compileGeneration;
-		this.numAllocate_(allocateCount);
 
 		forkIfNeeded {
 			var cond = Condition(false);
@@ -177,7 +170,7 @@ OndaDef {
 				}, '/done', server.addr);
 
 				server.sendMsg(
-					"/cmd", "onda_compile", id, compileGeneration, allocateCount, compilePath);
+					"/cmd", "onda_compile", id, compileGeneration, compilePath);
 				cond.hang;
 			} {
 				if(oscFunc.notNil) { oscFunc.free };
@@ -194,8 +187,8 @@ OndaDef {
 		}
 	}
 
-	add { |server, action, numAllocate = 32|
-		this.send(server, action, numAllocate);
+	add { |server, action|
+		this.send(server, action);
 	}
 
 	free { |server|

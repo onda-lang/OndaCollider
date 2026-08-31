@@ -14,9 +14,10 @@ Current host limits:
 
 list::
 ## `ins`, `params`, and `events` must be scalar.
-## `ins` and `params` must use `f32` endpoint types.
-## `events` must use a single `f32` payload and follow SC positive-edge trigger semantics.
+## `ins` must use `f32`; `params` may use any scalar primitive type.
+## `events` must use a single scalar primitive payload and follow SC positive-edge trigger semantics.
 ## `outs` must use `f32` endpoint types (`f32` or `f32[N]`).
+## Onda prints and top-level delegate occurrences are written to the SuperCollider server log. Capture is bounded per UGen; overflow or an unusually large formatted line produces a warning.
 ## SC buffer overrides must be `buffer<f32...>` and are driven from control-rate `bufnum` inputs. Project-owned buffers may use any Onda primitive element type.
 ## Buffer arrays require an `.ondaproject`, are omitted from `ins`, and cannot be overridden from SuperCollider.
 ::
@@ -44,8 +45,6 @@ ARGUMENT:: server
 Target link::Classes/Server::. Defaults to `Server.default`.
 ARGUMENT:: action
 Optional function evaluated after successful compile.
-ARGUMENT:: numAllocate
-Number of runtime instances to preallocate. Defaults to 32. Set this at least as high as the maximum number of simultaneous UGens using the definition.
 
 METHOD:: add
 Alias for `send`.
@@ -61,9 +60,6 @@ Collision-free server definition id retained for the lifetime of the sclang proc
 
 METHOD:: generation
 Latest compile/free generation sent for this definition key. Generations prevent stale asynchronous compiles from replacing newer requests.
-
-METHOD:: numAllocate
-Number of runtime instances requested by the latest send.
 
 METHOD:: ins
 Parsed input metadata array.

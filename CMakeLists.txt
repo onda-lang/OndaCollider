@@ -134,15 +134,31 @@ include(CTest)
 if(BUILD_TESTING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_program(SCLANG_EXECUTABLE sclang)
     find_program(BASH_EXECUTABLE bash)
+    find_program(SUPERNOVA_EXECUTABLE supernova)
     if(SCLANG_EXECUTABLE AND BASH_EXECUTABLE)
         add_test(
             NAME OndaIntegration
             COMMAND
                 "${CMAKE_COMMAND}" -E env
                 "SCLANG_EXECUTABLE=${SCLANG_EXECUTABLE}"
+                "ONDA_COLLIDER_SERVER_PROGRAM=scsynth"
                 "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/run-integration.sh" "${CMAKE_BINARY_DIR}"
         )
-        set_tests_properties(OndaIntegration PROPERTIES TIMEOUT 120)
+        set_tests_properties(OndaIntegration PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
+        if(TARGET Onda_supernova AND SUPERNOVA_EXECUTABLE)
+            add_test(
+                NAME OndaIntegrationSupernova
+                COMMAND
+                    "${CMAKE_COMMAND}" -E env
+                    "SCLANG_EXECUTABLE=${SCLANG_EXECUTABLE}"
+                    "ONDA_COLLIDER_SERVER_PROGRAM=supernova"
+                    "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/run-integration.sh" "${CMAKE_BINARY_DIR}"
+            )
+            set_tests_properties(OndaIntegrationSupernova PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+        else()
+            message(STATUS "Skipping Onda supernova integration test: target or executable unavailable")
+        endif()
     else()
         message(STATUS "Skipping Onda integration test: sclang or bash was not found")
     endif()

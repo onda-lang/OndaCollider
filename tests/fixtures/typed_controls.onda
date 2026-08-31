@@ -1,0 +1,38 @@
+params:
+  double_value: f64 = 1.5
+  int_value: i32 = 2
+  long_value: i64 = 3
+  enabled: bool = false
+
+outs:
+  out1
+
+delegate observed(kind: i32, amount: f64)
+
+init:
+  total = 0.0
+  print("typed init", double_value, int_value, long_value, enabled)
+
+event add_double(value: f64):
+  total = total + f32(value)
+  print("typed event", value)
+  observed(1, value)
+
+event add_int(value: i32):
+  total = total + f32(value)
+  observed(2, f64(value))
+
+event add_long(value: i64):
+  total = total + f32(value)
+  observed(3, f64(value))
+
+event add_bool(value: bool):
+  if value:
+    total = total + 16.0
+  observed(4, 1.0)
+
+sample:
+  value = f32(double_value) + f32(int_value) + f32(long_value) + total
+  if enabled:
+    value = value + 8.0
+  out1 = value

@@ -6,7 +6,7 @@ related:: Classes/OndaDef
 DESCRIPTION::
 Onda runs a compiled link::Classes/OndaDef::.
 
-Runtime processing uses the Onda native API with hot-swap and metadata-driven input/output mapping. Definitions may load an `.onda`/`.on` source or a self-contained `.ondaproject` manifest.
+Runtime processing uses the Onda native API with hot-swap and metadata-driven input/output mapping. Each UGen owns a fresh Onda runtime instance allocated from SuperCollider's real-time memory pool. Definitions may load an `.onda`/`.on` source or a self-contained `.ondaproject` manifest.
 
 Current host limits:
 
@@ -17,9 +17,10 @@ list::
 ## Missing or incompatible mapped buffers are unbound from Onda, and the UGen outputs silence until every required buffer is valid and rebound.
 ## Buffer lock mode follows Onda `may_write` metadata (shared for read-only, exclusive for writable).
 ## Inputs, params, and events must be scalar (no arrays).
-## Inputs and params must use `f32` endpoint types.
-## Events must use a single `f32` payload (one control argument per event endpoint). A transition from non-positive to positive fires once; the positive edge value is the payload. Onda event parameter defaults do not replace the idle SC value of zero.
+## Inputs must use `f32`. Params may use any scalar primitive type; SC controls are converted to the declared type.
+## Events must use a single scalar primitive payload (one control argument per event endpoint). A transition from non-positive to positive fires once; the positive edge value is converted to the payload type. Triggered `bool` events receive `true`. Onda event parameter defaults do not replace the idle SC value of zero.
 ## Outputs must use `f32` endpoint types (`f32` or `f32[N]`).
+## Onda prints and top-level delegate occurrences are written to the SuperCollider server log. Capture is bounded per UGen; overflow or an unusually large formatted line produces a warning.
 ::
 
 CLASSMETHODS::

@@ -90,6 +90,18 @@ jobs:
       shell: bash
       run: |
         jackd -d dummy -r 48000 -p 1024 > /tmp/onda-jackd.log 2>&1 &
+        jack_ready=0
+        for attempt in {1..50}; do
+          if jack_lsp >/dev/null 2>&1; then
+            jack_ready=1
+            break
+          fi
+          sleep 0.1
+        done
+        if [[ "$jack_ready" != 1 ]]; then
+          cat /tmp/onda-jackd.log
+          exit 1
+        fi
         ctest --test-dir "$BUILD_PATH" --output-on-failure
 
     - name: Install

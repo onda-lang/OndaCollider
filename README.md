@@ -84,15 +84,26 @@ Onda's neutral default for an unbound array slot).
 
 Current constraints:
 
-- `ins` and `params` must use `f32` endpoint types for SC integration.
-- `events` must use a single `f32` payload (one control argument per event endpoint). They follow
+- `ins` must use `f32`; `params` may use any scalar Onda primitive type. SC controls are converted
+  to the declared parameter type: integer values truncate toward zero and saturate at the type
+  limits, while `bool` uses a `0.5` threshold.
+- `events` must use a single scalar primitive payload (one control argument per event endpoint).
+  The positive edge value is converted to the declared payload type, with integer conversion using
+  truncation and saturation. Events follow
   SC trigger semantics: a transition from non-positive to positive fires once, and the positive
-  edge value becomes the payload. Onda event parameter defaults do not replace the idle SC value.
+  edge value becomes the payload. A triggered `bool` event receives `true`. Onda event parameter
+  defaults do not replace the idle SC value.
 - `outs` must use `f32` endpoint types (`f32` or `f32[N]`, flattened to SC channels).
 - SC `Buffer` overrides support `buffer<f32...>` endpoints. Project-owned buffers may use any Onda
   primitive element type.
 - Buffer arrays require an `.ondaproject` and cannot be overridden from SuperCollider.
 - Missing or incompatible SC buffers are unbound from Onda, and the UGen outputs silence until every required buffer is valid and rebound.
+- Onda `print(...)` output and top-level delegate occurrences are written to the SuperCollider
+  server log. Output capture is bounded per UGen; excess occurrences or unusually large formatted
+  lines are dropped with a server warning rather than allocating while processing.
+- Each `Onda` UGen owns a fresh runtime instance allocated from SuperCollider's real-time memory
+  pool. Hot-swap replaces that instance, and freeing a definition releases it while leaving the
+  UGen silent.
 
 ## Examples
 
@@ -106,11 +117,13 @@ Current constraints:
 
 ## Tests
 
-On Linux, after building, run the headless scsynth integration suite with:
+On Linux, after building, run the headless integration suite with:
 
 ```bash
 ctest --test-dir build --output-on-failure
 ```
 
-The suite exercises source and project compilation, buffer defaults and overrides, buffer-array
-constraints, event edges, definition ordering, and invalid-buffer silence.
+The suite runs against both scsynth and supernova when available; the supernova case requires a
+running JACK-compatible server. It exercises source and project compilation, per-UGen instance
+ownership, bounded logging memory, buffer defaults and overrides, buffer-array constraints, event
+edges, definition ordering, and invalid-buffer silence.
