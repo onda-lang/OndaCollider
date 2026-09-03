@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
 set(project_name "Onda")
 
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/ondacollider-version" ONDACOLLIDER_VERSION LIMIT_COUNT 1)
+string(STRIP "${ONDACOLLIDER_VERSION}" ONDACOLLIDER_VERSION)
+if(ONDACOLLIDER_VERSION STREQUAL "")
+    message(FATAL_ERROR "Could not determine the OndaCollider version")
+endif()
+
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ------------------------------------------------------------------
@@ -28,7 +34,8 @@ set(SC_PATH "${SC_PATH}" CACHE PATH "Path to SC Source" FORCE)
 include("${SC_PATH}/SCVersion.txt")
 message(STATUS "Building for SuperCollider version: ${SC_VERSION}")
 
-project(${project_name})
+project(${project_name} VERSION "${ONDACOLLIDER_VERSION}")
+message(STATUS "Building OndaCollider version: ${PROJECT_VERSION}")
 sc_do_initial_compiler_config()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -102,6 +109,7 @@ sc_add_server_plugin(
     "${Onda_sc_files}"
     "${Onda_schelp_files}"
 )
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/ondacollider-version" DESTINATION "Onda" RENAME "VERSION")
 
 # ------------------------------------------------------------------
 # 4. LINKING
@@ -113,7 +121,9 @@ function(finalize_target target_name)
         target_link_libraries(${target_name} PRIVATE Onda::Static)
         target_compile_definitions(
             ${target_name}
-            PRIVATE ONDACOLLIDER_ONDA_VERSION="${ONDA_BUILD_VERSION}"
+            PRIVATE
+                ONDACOLLIDER_VERSION="${PROJECT_VERSION}"
+                ONDACOLLIDER_ONDA_VERSION="${ONDA_BUILD_VERSION}"
         )
         if(ONDA_SYSTEM_LIBS)
             target_link_libraries(${target_name} PRIVATE ${ONDA_SYSTEM_LIBS})

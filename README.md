@@ -4,6 +4,10 @@ SuperCollider plugin for running the [onda](https://github.com/onda-lang/onda) J
 
 Pre-built binaries are available in the Release page.
 
+OndaCollider releases are versioned independently from Onda. The current OndaCollider version is
+pinned in [`ondacollider-version`](ondacollider-version), while [`onda-version`](onda-version) pins
+the Onda SDK used to build it.
+
 ## Build
 
 Default flow: download the pinned Onda SDK and install the plugin.
