@@ -1,4 +1,4 @@
-Keep the implementation concise, precise and easy to understand. Strive for elegant, well-thought-out and correct design rather than settling for the first draft. Aim for the simplest solution that works robustly, and strictly avoid bad practices that introduce fragile workarounds, one-off solutions that only work in narrow cases and don't scale, dead code and over-engineering. 
+Keep the implementation concise, precise and easy to understand. Strive for elegant, well-thought-out and correct design rather than settling for the first draft. Aim for the simplest solution that works robustly, and strictly avoid bad practices that introduce fragile workarounds, one-off solutions that only work in narrow cases and don't scale, code duplication, dead code and over-engineering. 
 
 No hand-authored source file may exceed 5,000 lines of code. Generated, vendored, and lock files are exempt. Split files before they reach the limit.
 
