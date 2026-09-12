@@ -95,7 +95,6 @@ T integerFromControl(float value) {
 bool packControlPrimitive(
     float value,
     int elemType,
-    bool triggeredBool,
     std::array<uint8_t, sizeof(double)>& payload) {
     payload.fill(0);
     switch (elemType) {
@@ -118,7 +117,7 @@ bool packControlPrimitive(
             return true;
         }
         case ONDA_PRIMITIVE_BOOL:
-            payload[0] = (triggeredBool || value >= 0.5f) ? 1 : 0;
+            payload[0] = value >= 0.5f ? 1 : 0;
             return true;
         default:
             return false;
@@ -513,8 +512,7 @@ bool buildProgramMetadata(
         desc.elemType = elemType;
         desc.elemBytes = elemBytes;
         desc.arrayLen = 1;
-        // Event controls use SC trigger semantics. Zero is idle; a positive edge triggers the
-        // event and is converted to the declared scalar payload type.
+        // Event controls start at zero and emit their declared scalar payload whenever changed.
         desc.hasInit = true;
         desc.init = 0.0f;
 
@@ -2064,7 +2062,7 @@ bool Onda::prepareParams() {
 
         if (!state.initialized || state.previousValue != value) {
             std::array<uint8_t, sizeof(double)> payload{};
-            if (!packControlPrimitive(value, desc.elemType, false, payload)) {
+            if (!packControlPrimitive(value, desc.elemType, payload)) {
                 Print(
                     "ERROR: Onda (definition %d, instance %d): param '%s' has an unsupported type.\n",
                     mDefinitionId,
@@ -2092,14 +2090,12 @@ bool Onda::triggerEvents() {
         const auto& desc = mProgram->inputs[i];
         const int scSlot = i + 1;
         const float value = (scSlot > 0) ? in0(scSlot) : 0.0f;
-        const bool triggered = value > 0.0f
-            && (!state.initialized || state.previousValue <= 0.0f);
+        const bool triggered = state.previousValue != value;
         state.previousValue = value;
-        state.initialized = true;
 
         if (triggered) {
             std::array<uint8_t, sizeof(double)> payload{};
-            if (!packControlPrimitive(value, desc.elemType, true, payload)) {
+            if (!packControlPrimitive(value, desc.elemType, payload)) {
                 Print(
                     "ERROR: Onda (definition %d, instance %d): event '%s' has an unsupported payload type.\n",
                     mDefinitionId,

@@ -15,7 +15,7 @@ Current host limits:
 list::
 ## `ins`, `params`, and `events` must be scalar.
 ## `ins` must use `f32`; `params` may use any scalar primitive type.
-## `events` must use a single scalar primitive payload and follow SC positive-edge trigger semantics.
+## `events` must use a single scalar primitive payload and fire whenever their control value changes.
 ## `outs` must use `f32` endpoint types (`f32` or `f32[N]`).
 ## Onda prints and top-level delegate occurrences are written to the SuperCollider server log. Capture is bounded per UGen; overflow or an unusually large formatted line produces a warning.
 ## SC buffer overrides must be `buffer<f32...>` and are driven from control-rate `bufnum` inputs. Project-owned buffers may use any Onda primitive element type.

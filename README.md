@@ -1,12 +1,10 @@
-# OndaCollider
+<h1>
+  <img src="assets/svg/onda-logo-dark.svg" alt="onda logo" width="40" align="absmiddle" /> OndaCollider
+</h1>
 
-SuperCollider plugin for running the [onda](https://github.com/onda-lang/onda) JIT compiler in `scsynth`/`supernova`.
+SuperCollider plugin to run the [Onda](https://github.com/onda-lang/onda) audio programming language in `scsynth`/`supernova`.
 
-Pre-built binaries are available in the Release page.
-
-OndaCollider releases are versioned independently from Onda. The current OndaCollider version is
-pinned in [`ondacollider-version`](ondacollider-version), while [`onda-version`](onda-version) pins
-the Onda SDK used to build it.
+[Pre-built binaries](https://github.com/onda-lang/OndaCollider/releases) are available for Windows, macOS and Linux.
 
 ## Build
 
@@ -63,11 +61,6 @@ Supported SDK asset patterns:
 - `onda-<version>-macos-arm64.tar.xz`
 - `onda-<version>-windows-x64.zip`
 
-## Windows Notes
-
-- OndaCollider is configured to use the static MSVC runtime (`/MT`, `/MTd`) on Windows.
-- For fully static Windows linking, Onda should be built with a matching CRT configuration.
-
 ## Usage
 
 For usage and examples, check the `OndaDef` and `Onda` help files.
@@ -92,11 +85,9 @@ Current constraints:
   to the declared parameter type: integer values truncate toward zero and saturate at the type
   limits, while `bool` uses a `0.5` threshold.
 - `events` must use a single scalar primitive payload (one control argument per event endpoint).
-  The positive edge value is converted to the declared payload type, with integer conversion using
-  truncation and saturation. Events follow
-  SC trigger semantics: a transition from non-positive to positive fires once, and the positive
-  edge value becomes the payload. A triggered `bool` event receives `true`. Onda event parameter
-  defaults do not replace the idle SC value.
+  An event fires whenever its control value changes, and the new value is converted to the declared
+  payload type. Integer conversion uses truncation and saturation, while `bool` uses a `0.5`
+  threshold. Event controls default to zero.
 - `outs` must use `f32` endpoint types (`f32` or `f32[N]`, flattened to SC channels).
 - SC `Buffer` overrides support `buffer<f32...>` endpoints. Project-owned buffers may use any Onda
   primitive element type.
@@ -105,9 +96,6 @@ Current constraints:
 - Onda `print(...)` output and top-level delegate occurrences are written to the SuperCollider
   server log. Output capture is bounded per UGen; excess occurrences or unusually large formatted
   lines are dropped with a server warning rather than allocating while processing.
-- Each `Onda` UGen owns a fresh runtime instance allocated from SuperCollider's real-time memory
-  pool. Hot-swap replaces that instance, and freeing a definition releases it while leaving the
-  UGen silent.
 
 ## Examples
 

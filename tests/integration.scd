@@ -113,7 +113,7 @@ server.waitForBoot {
             eventDef = compile.(\eventEdge, fixtures +/+ "event_edge.onda");
             assert.(eventDef.ins.size == 1, "event program should expose one control");
             assert.(eventDef.ins[0][\meta][\kind] == \event, "event metadata kind should be preserved");
-            assertClose.(eventDef.ins[0][\meta][\init], 0.0, "events should default to an idle trigger");
+            assertClose.(eventDef.ins[0][\meta][\init], 0.0, "events should default to zero");
 
             eventBus = Bus.control(server, 1);
             SynthDef(\ondaEventEdgeTest, { |resultBus = 0, eventValue = 0|
@@ -124,14 +124,15 @@ server.waitForBoot {
             0.1.wait;
             eventSynth.set(\eventValue, 2.0);
             0.1.wait;
-            assertClose.(readBus.(eventBus), 2.0, "a positive edge should trigger once");
+            assertClose.(readBus.(eventBus), 2.0, "a changed event control should trigger once");
             0.1.wait;
-            assertClose.(readBus.(eventBus), 2.0, "a held-positive trigger must not retrigger each block");
-            eventSynth.set(\eventValue, 0.0);
-            0.05.wait;
+            assertClose.(readBus.(eventBus), 2.0, "an unchanged event control must not retrigger each block");
             eventSynth.set(\eventValue, 3.0);
             0.1.wait;
-            assertClose.(readBus.(eventBus), 5.0, "a new positive edge should carry its f32 payload");
+            assertClose.(readBus.(eventBus), 5.0, "a positive-to-positive change should carry its f32 payload");
+            eventSynth.set(\eventValue, -1.0);
+            0.1.wait;
+            assertClose.(readBus.(eventBus), 4.0, "a negative change should carry its f32 payload");
 
             typedDef = compile.(\typedControls, fixtures +/+ "typed_controls.onda");
             assert.(typedDef.ins.size == 8, "typed controls should expose four params and four events");
@@ -198,9 +199,9 @@ server.waitForBoot {
             typedSynth.set(\addLong, 4.75);
             0.1.wait;
             assertClose.(readBus.(typedBus), 16.0, "i64 event payloads should truncate SC controls");
-            typedSynth.set(\addBool, 0.25);
+            typedSynth.set(\addBool, 0.75);
             0.1.wait;
-            assertClose.(readBus.(typedBus), 32.0, "positive bool event edges should convert to true");
+            assertClose.(readBus.(typedBus), 32.0, "bool event payloads should use the standard threshold");
 
             longPrintSource = "outs:\n  out1\n\ninit:\n  print(\""
                 ++ String.fill(9000, { $x })
@@ -221,7 +222,7 @@ server.waitForBoot {
             invalidDef.send(server);
             0.5.wait;
             assert.(OndaDef.all[\eventEdge] === eventDef, "a failed replacement must retain the last good definition");
-            assertClose.(readBus.(eventBus), 5.0, "a failed replacement must retain the running server program");
+            assertClose.(readBus.(eventBus), 4.0, "a failed replacement must retain the running server program");
 
             projectDef = compile.(\projectDefaults, fixtures +/+ "project_defaults" +/+ "project.ondaproject");
             assert.(projectDef.ins.size == 1, "non-f32 project buffers should remain project-owned");

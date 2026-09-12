@@ -18,7 +18,7 @@ list::
 ## Buffer lock mode follows Onda `may_write` metadata (shared for read-only, exclusive for writable).
 ## Inputs, params, and events must be scalar (no arrays).
 ## Inputs must use `f32`. Params may use any scalar primitive type; SC controls are converted to the declared type.
-## Events must use a single scalar primitive payload (one control argument per event endpoint). A transition from non-positive to positive fires once; the positive edge value is converted to the payload type. Triggered `bool` events receive `true`. Onda event parameter defaults do not replace the idle SC value of zero.
+## Events must use a single scalar primitive payload (one control argument per event endpoint). An event fires whenever its control value changes, and the new value is converted to the payload type. Integer conversion truncates and saturates, while `bool` uses a `0.5` threshold. Event controls default to zero.
 ## Outputs must use `f32` endpoint types (`f32` or `f32[N]`).
 ## Onda prints and top-level delegate occurrences are written to the SuperCollider server log. Capture is bounded per UGen; overflow or an unusually large formatted line produces a warning.
 ::
@@ -42,7 +42,7 @@ list::
 ::
 
 Input init defaults from compile metadata are applied on the sclang side.
-Params are sent to Onda only when their control value changes. Event controls use SC trigger semantics and are not retriggered while held positive.
+Params and events are sent to Onda only when their control value changes.
 
 EXAMPLES::
 
