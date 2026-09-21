@@ -1,3 +1,21 @@
+OndaControlSpec : ControlSpec {
+	constrain { |value|
+		var plain = value.asFloat;
+		var clipped = if(plain.isNaN) { minval } { plain.clip(minval, maxval) };
+
+		if(step <= 0.0) { ^clipped };
+		^(minval + (((clipped - minval) / step).round * step)).clip(minval, maxval)
+	}
+
+	map { |value|
+		^this.constrain(warp.map(value.clip(0.0, 1.0)))
+	}
+
+	unmap { |value|
+		^warp.unmap(this.constrain(value))
+	}
+}
+
 OndaDef {
 	classvar <all, <definitionIds, <generations;
 	classvar nextDefinitionId;
@@ -10,6 +28,7 @@ OndaDef {
 
 	var <ins;
 	var <outs;
+	var <specs;
 
 	*initClass {
 		all = IdentityDictionary.new;
@@ -59,6 +78,7 @@ OndaDef {
 
 		key = argKey.asSymbol;
 		id = this.class.definitionIdFor(key);
+		specs = IdentityDictionary.new;
 
 		src = argSource.asString;
 		srcPath = PathName(src);
@@ -100,6 +120,9 @@ OndaDef {
 			var temporaryPath;
 			var compileSucceeded = false;
 			var oscFunc;
+			var decodeReplyField = { |encoded|
+				encoded.drop(1).replace("%2F", "/").replace("%25", "%")
+			};
 
 			protect {
 				if(compilePath.isNil) {
@@ -112,23 +135,25 @@ OndaDef {
 				var rawStr = msg.last.asString;
 				var parts = rawStr.split($/);
 
-				if(parts[0].asSymbol == \_onda) {
-					var replyId = parts[1].asInteger;
-					var replyGeneration = parts[2].asInteger;
+				if(parts[0].asSymbol == \_onda and: { parts[1].asInteger == 2 }) {
+					var replyId = parts[2].asInteger;
+					var replyGeneration = parts[3].asInteger;
 
 					if((id == replyId) and: { compileGeneration == replyGeneration }) {
-						var success = parts[3].asSymbol != \_fail;
+						var success = parts[4].asSymbol != \_fail;
 						if (success) {
-							var numIns = parts[3].asInteger;
-							var cursor = 4;
-
-							ins = Array.newClear(numIns);
+							var numIns = parts[4].asInteger;
+							var cursor = 5;
+							var compiledIns = Array.newClear(numIns);
+							var compiledSpecs = IdentityDictionary.new;
 
 							numIns.do({ |inputIndex|
 								var name = parts[cursor].asSymbol;
 								var rateInt = parts[cursor + 1].asInteger;
 								var kindInt = parts[cursor + 2].asInteger;
 								var hasInit = parts[cursor + 3].asInteger != 0;
+								var init = parts[cursor + 4].asFloat;
+								var hasSpec = parts[cursor + 5].asInteger != 0;
 								var rateSym;
 								var meta = (
 									kind: case
@@ -145,17 +170,40 @@ OndaDef {
 									rateSym = \control;
 								};
 
-								if(hasInit) { meta[\init] = parts[cursor + 4].asFloat };
-								cursor = cursor + 5;
+								if(hasInit) { meta[\init] = init };
+								cursor = cursor + 6;
 
-								ins[inputIndex] = (
+								if(hasSpec) {
+									var minimum = parts[cursor].asFloat;
+									var maximum = parts[cursor + 1].asFloat;
+									var scale = parts[cursor + 2].asSymbol;
+									var hasCurve = parts[cursor + 3].asInteger != 0;
+									var curve = parts[cursor + 4].asFloat;
+									var hasStep = parts[cursor + 5].asInteger != 0;
+									var step = if(hasStep) { parts[cursor + 6].asFloat } { 0.0 };
+									var unit = decodeReplyField.(parts[cursor + 7]);
+									var warp = if(hasCurve) { curve } { scale };
+									var default = if(hasInit) { init } { 0.0 };
+									var spec = OndaControlSpec(
+										minimum, maximum, warp, step,
+										default, unit);
+
+									spec.default = spec.constrain(default);
+									meta[\spec] = spec;
+									compiledSpecs.put(name, spec);
+									cursor = cursor + 8;
+								};
+
+								compiledIns[inputIndex] = (
 									name: name,
 									rate: rateSym,
 									meta: meta
 								);
 							});
 
-							outs = parts.last.asInteger;
+							ins = compiledIns;
+							outs = parts[cursor].asInteger;
+							specs = compiledSpecs;
 							all.put(key, this);
 							compileSucceeded = true;
 
@@ -224,6 +272,7 @@ OndaDef {
 		("Generation: " ++ generation).postln;
 		("Inputs: " ++ ins).postln;
 		("Outputs: " ++ outs).postln;
+		("Specs: " ++ specs).postln;
 	}
 
 	isOndaDef {

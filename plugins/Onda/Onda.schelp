@@ -1,48 +1,84 @@
 TITLE:: Onda
 summary:: Onda UGen
 categories:: UGens>Plugins
-related:: Classes/OndaDef
+related:: Classes/OndaDef, Classes/ControlSpec, Classes/NamedControl
 
 DESCRIPTION::
-Onda runs a compiled link::Classes/OndaDef::.
+Onda is an audio-rate, multi-output link::Classes/UGen:: that runs a program previously compiled by link::Classes/OndaDef::. It does not compile Onda source itself. The definition must finish compiling before Onda is used in a link::Classes/SynthDef:: graph.
 
-Runtime processing uses the Onda native API with hot-swap and metadata-driven input/output mapping. Each UGen owns a fresh Onda runtime instance allocated from SuperCollider's real-time memory pool. Definitions may load an `.onda`/`.on` source or a self-contained `.ondaproject` manifest.
+Each Onda UGen owns an independent runtime instance, including its Onda state and processor state. Multiple UGens can therefore use the same definition without sharing DSP state. Inputs, controls, buffers, and flattened output channels are derived from the metadata cached by OndaDef after compilation.
 
-Current host limits:
+SUBSECTION:: Typical workflow
+
+First create an OndaDef and send it to the running server. Create the Onda UGen from the success callback so its interface metadata is available. The OndaDef object can be passed directly:
+
+code::
+a = OndaDef(\voice, "/path/to/voice.onda");
+a.send(s, {
+    {
+        Onda.ar(a, (freq: MouseX.kr(110, 880, 1)))
+    }.play;
+});
+::
+
+After successful compilation, it can instead be looked up by its link::Classes/Symbol:: key:
+
+code::Onda.ar(\voice, (freq: 440))::
+
+SUBSECTION:: Input mapping
+
+Named mapping passes one link::Classes/Event:: whose keys match the compiled Onda endpoint names. Positional mapping follows the order shown by link::Classes/OndaDef#-ins:: and link::Classes/OndaDef#-query::. Missing values use their cached initialization values; if none exists, Onda warns and supplies zero.
+
+Onda audio inputs are promoted to audio rate with link::Classes/K2A:: when necessary. Params, events, and buffer numbers are control-rate endpoints; audio-rate arguments supplied for them are reduced with link::Classes/A2K::. Params and buffer bindings are updated when their SC control value changes. An event fires when its control value changes, using the new value as its payload.
+
+Onda parameter ranges still clamp values at the compiled DSP boundary. Ranged params also expose link::Classes/ControlSpec:: objects through link::Classes/OndaDef#-specs::. Onda does not attach them to SynthDef controls automatically; request one explicitly when creating a control:
+
+code::
+var cutoff = \cutoff.kr(spec: definition.specs[\cutoff]);
+Onda.ar(definition, (cutoff: cutoff));
+::
+
+The spec is client-side metadata for interfaces and normalized mappings. Onda arguments and link::Classes/Synth#-set:: continue to use plain Onda units.
+
+SUBSECTION:: Hot swap and lifetime
+
+Sending a successfully compiled OndaDef under the same key replaces the server-side program and hot-swaps every running Onda UGen using it. Hot-swap creates and fully initializes a new Onda runtime instance; authored state is not preserved.
+
+Keep the SC-facing input order, endpoint rates and kinds, and flattened output channel count compatible when hot-swapping. If the interface shape changes, create a new link::Classes/Synth::. An incompatible hot-swap releases the old instance and silences that UGen. Freeing the OndaDef likewise silences its running UGens.
+
+SUBSECTION:: Current limitations
 
 list::
-## SC buffer overrides support `buffer<f32...>`, mapped from control-rate `bufnum` inputs. Project-owned buffers may use any Onda primitive element type.
-## An `f32` buffer supplied by a project uses that asset when its UGen argument is omitted or `-1`; a valid SC `bufnum` overrides it.
-## Buffer arrays require an `.ondaproject`. They are not exposed as UGen inputs and always use their project assets or Onda's neutral default for unbound slots.
+## Inputs, params, and events must be scalar; arrays are not supported.
+## Inputs must use teletype::f32::. Params may use any scalar Onda primitive type. SC controls are teletype::f32:: values; integer params truncate toward zero and saturate at their type limits, while teletype::bool:: uses a code::0.5:: threshold.
+## Events must use a single scalar primitive payload (one control argument per event endpoint). An event fires whenever its control value changes, and the new value is converted to the payload type. Integer conversion truncates and saturates, while teletype::bool:: uses a code::0.5:: threshold. Event controls default to zero.
+## Outputs must use teletype::f32:: endpoint types (teletype::f32:: or teletype::f32[N]::).
+## SC link::Classes/Buffer:: overrides support teletype::buffer<f32...>::, mapped from control-rate code::bufnum:: inputs. Project-owned buffers may use any Onda primitive element type.
+## A teletype::f32:: buffer supplied by a project uses that asset when its UGen argument is omitted or code::-1::; a valid SC code::bufnum:: overrides it.
+## Project-owned buffers with non-teletype::f32:: elements are not exposed as UGen inputs and cannot be overridden from SuperCollider.
+## Buffer arrays require an code::.ondaproject::. They are not exposed as link::Classes/UGen:: inputs and always use their project assets or Onda's neutral default for unbound slots.
 ## Missing or incompatible mapped buffers are unbound from Onda, and the UGen outputs silence until every required buffer is valid and rebound.
-## Buffer lock mode follows Onda `may_write` metadata (shared for read-only, exclusive for writable).
-## Inputs, params, and events must be scalar (no arrays).
-## Inputs must use `f32`. Params may use any scalar primitive type; SC controls are converted to the declared type.
-## Events must use a single scalar primitive payload (one control argument per event endpoint). An event fires whenever its control value changes, and the new value is converted to the payload type. Integer conversion truncates and saturates, while `bool` uses a `0.5` threshold. Event controls default to zero.
-## Outputs must use `f32` endpoint types (`f32` or `f32[N]`).
-## Onda prints and top-level delegate occurrences are written to the SuperCollider server log. Capture is bounded per UGen; overflow or an unusually large formatted line produces a warning.
+## Buffer lock mode follows Onda teletype::may_write:: metadata (shared for read-only, exclusive for writable).
+## Onda teletype::print(...):: output and top-level delegate occurrences are written to the link::Classes/Server:: log rather than delivered to sclang. Capture and formatting storage are bounded per UGen; overflow or an unusually large formatted line produces a warning.
 ::
 
 CLASSMETHODS::
 
 METHOD:: ar
-Build an Onda UGen from a previously compiled OndaDef.
+Create an audio-rate Onda UGen from a successfully compiled OndaDef. The number of output channels is taken from the definition metadata.
 
 ARGUMENT:: def
-Definition key (`Symbol`) or OndaDef object.
+A successfully compiled link::Classes/OndaDef:: object, or its link::Classes/Symbol:: key. A key resolves the current definition in code::OndaDef.all::. The numeric OndaDef code::id:: is an internal server identifier and is not accepted here.
 
 ARGUMENT:: ... args
-Inputs can be passed as:
+Onda inputs, params, events, and exposed buffers. They can be passed in either of these forms:
 
 list::
-## Event mapping:
-`Onda.ar(\myDef, (freq: 440, gain: 0.2))`
-## Positional mapping:
-`Onda.ar(\myDef, 440, 0.2)`
+## strong::Event mapping::: Pass a single link::Classes/Event:: whose keys match the Onda input names.
+code::Onda.ar(\myDef, (freq: 440, gain: 0.2))::
+## strong::Positional mapping::: Pass arguments in the metadata order shown by OndaDef.
+code::Onda.ar(\myDef, 440, 0.2)::
 ::
-
-Input init defaults from compile metadata are applied on the sclang side.
-Params and events are sent to Onda only when their control value changes.
 
 EXAMPLES::
 
@@ -51,59 +87,42 @@ code::
 (
 s.waitForBoot({
     var code = "
-def add_phase(p, inc, upper = twopi):
-  next = p + inc
-  if (next >= upper):
-    next = next - upper
-  return next
+import std/osc
 
 proc DualOsc<T>:
   params<T>:
     freq = 110.0
-    modDepth  = 1.5
+    modDepth = 1.5
     detune = 1.0
 
   outs<T> 2
 
   init<T>:
-    phaseA = 0.0
-    phaseB = 0.0
+    oscA = std::osc::Sine<T>()
+    oscB = std::osc::Sine<T>()
     lastA = 0.0
     lastB = 0.0
 
   sample 8:
-    incA = freq * twopi / samplerate
-    incB = (freq + detune) * twopi / samplerate
-
-    phaseA = add_phase(phaseA, incA)
-    phaseB = add_phase(phaseB, incB)
-
-    currentA = sin(phaseA + (lastB * modDepth))
-    currentB = sin(phaseB + (lastA * modDepth))
-
+    currentA = oscA(freq = freq, phase_offset = lastB * modDepth)
+    currentB = oscB(freq = freq + detune, phase_offset = lastA * modDepth)
+    lastA = currentA
+    lastB = currentB
     out1 = currentA
     out2 = currentB
 
-    lastA = currentA
-    lastB = currentB
-
 params:
-  freq = 110.0
-  modDepth = 1.5
-  detune = 1.0
+  freq = 110.0 {20.0, 1000.0}
+  modDepth = 1.5 {0.0, 20.0}
+  detune = 1.0 {0.0, 100.0}
 
 init:
-  osc = DualOsc<f64>(freq = freq, modDepth = modDepth, detune = detune)
+  osc = DualOsc<f64>()
 
-block:
-  osc.freq = freq
-  osc.modDepth = modDepth
-  osc.detune = detune
-
-  sample:
-    osc()
-    out1 = f32(osc.out1)
-    out2 = f32(osc.out2)
+sample:
+  osc1, osc2 = osc(freq = freq, modDepth = modDepth, detune = detune)
+  out1 = f32(osc1)
+  out2 = f32(osc2)
 ";
 
     OndaDef(\dualOsc, code).send(s, {
@@ -124,37 +143,28 @@ code::
 s.waitForBoot({
     var b;
     var code = "
-import std/data
+const DelayCapacity = i32(SR)
 
 params:
-  drive = 1.0
-  delayTime = 0.2
-  feedback = 0.5
+  drive = 1.0 {1.0, 20.0}
+  delayTime = 0.2 {1.0 / SR, f32(DelayCapacity - 1) / SR}
+  feedback = 0.5 {0.0, 0.99}
 
 init:
-  data = std::data::Data()
-  dataLen = data.len()
-  writePos = 0
+  delayLine: f32[DelayCapacity]
+  writePos = 0 {DelayCapacity, wrap}
 
 block:
-  delaySamples = i32(delayTime * samplerate)
-  if (delaySamples < 1):
-    delaySamples = 1
-  if (delaySamples >= dataLen):
-    delaySamples = dataLen - 1
+  delaySamples = i32(delayTime * SR) {1..DelayCapacity}
 
   sample:
-    readPos = writePos - delaySamples
-    if (readPos < 0):
-      readPos = readPos + dataLen
+    readPos = (writePos - delaySamples) {DelayCapacity, wrap}
 
     distorted = tanh(in1 * drive)
-    delayed = data.read(readPos)
+    delayed = delayLine[readPos]
 
-    data.write(writePos, distorted + delayed * feedback)
-    writePos = writePos + 1
-    if (writePos >= dataLen):
-      writePos = 0
+    delayLine[writePos] = distorted + delayed * feedback
+    writePos += 1
 
     out1 = delayed + distorted
 ";
@@ -185,33 +195,28 @@ code::
 (
 s.waitForBoot({
     var code = "
+const Timestep = 0.001
+
 params:
-  rho = 28.0
-  sigma = 10.0
-  beta = 2.666
-  speed = 20.0
+  rho = 28.0 {0.0, 50.0}
+  sigma = 10.0 {0.0, 20.0}
+  beta = 2.666 {0.0, 10.0}
+  speed = 20 {1, 200}
 
 init:
   x = 0.1
   y = 0.0
   z = 0.0
-  dt = 0.001
 
 sample:
-  iterations: i32 = i32(speed)
-  if (iterations < 1):
-    iterations = 1
-  if (iterations > 200):
-    iterations = 200
-
-  for i in 0..iterations:
+  loop speed:
     dx = sigma * (y - x)
     dy = x * (rho - z) - y
     dz = x * y - beta * z
 
-    x = x + dx * dt
-    y = y + dy * dt
-    z = z + dz * dt
+    x += dx * Timestep
+    y += dy * Timestep
+    z += dz * Timestep
 
   out1 = x * 0.03
   out2 = y * 0.03
@@ -234,26 +239,21 @@ code::
 s.waitForBoot({
     var code = "
 params:
-  cutoff = 1000.0
-  q = 0.707107
-  mode = 0.0
+  cutoff = 1000.0 {20.0, 20000.0}
+  q = 0.707107 {0.01, 4.0}
+  mode = 0 {0, 2}
 
 init:
   z1 = 0.0
   z2 = 0.0
 
 block:
-  c = clamp(cutoff, 0.0, samplerate * 0.48)
-  qv = q
-  if (qv < 0.01):
-    qv = 0.01
-
-  f = tan(pi * c / samplerate)
-  invQ = 1.0 / qv
+  frequency = min(cutoff, SR * 0.48)
+  f = tan(PI * frequency / SR)
+  invQ = 1.0 / q
   d = 1.0 / (1.0 + invQ * f + f * f)
   a = f
   g1 = f + invQ
-  m = i32(mode)
 
   sample:
     high = (in1 - g1 * z1 - z2) * d
@@ -263,9 +263,9 @@ block:
     z1 = a * high + band
     z2 = a * band + low
 
-    if m <= 0:
+    if mode == 0:
       out1 = low
-    elif m == 1:
+    elif mode == 1:
       out1 = high
     else:
       out1 = band
@@ -299,9 +299,9 @@ buffers:
   buf
 
 params:
-  rate = 1.0
-  pos = 0.5
-  grainSize = 0.1
+  rate = 1.0 {0.25, 5.0}
+  pos = 0.5 {0.0, 1.0}
+  grainSize = 0.1 {0.01, 0.3}
 
 init:
   start = 0.0
@@ -309,27 +309,21 @@ init:
   jphase = 0.0
 
 block:
-  bufLen = buf.len()
-  if (bufLen < 2):
-    bufLen = 2
-
-  safeGrain = grainSize
-  if (safeGrain < 0.001):
-    safeGrain = 0.001
+  bufLen = f32(buf.len())
 
   sample:
-    if (phase >= safeGrain):
+    if phase >= grainSize:
       phase = 0.0
-      jphase = jphase + 0.73
+      jphase = wrap(jphase + 0.73, 0.0, TWO_PI)
       jitter = sin(jphase) * 0.1
       start = clamp((pos + jitter) * bufLen, 0.0, bufLen - 1.0)
 
-    readPos = start + (phase * samplerate * rate)
+    readPos = start + phase * SR * rate
+    window = 0.5 * (1.0 - cos(TWO_PI * phase / grainSize))
 
-    w = 0.5 * (1.0 - cos(twopi * phase / safeGrain))
-    out1 = buf.readL(readPos) * w
+    phase += 1.0 / SR
 
-    phase = phase + 1.0 / samplerate
+    out1 = buf.readLW(readPos) * window
 ";
 
     b = Buffer.read(s, ExampleFiles.child);
@@ -365,50 +359,47 @@ buffers:
   buf
 
 params:
-  rate = 1.0
-  pos = 0.5
-  spread = 0.02
-  grainSize = 0.12
+  rate = 1.0 {0.25, 5.0}
+  pos = 0.5 {0.0, 1.0}
+  spread = 0.02 {0.0, 0.12}
+  grainSize = 0.12 {0.01, 0.3}
 
 init:
-  startA = 0.0; startB = 0.0
-  phaseA = 0.0; phaseB = 0.5
+  startA = 0.0
+  startB = 0.0
+  phaseA = 0.0
+  phaseB = 0.5
   jphase = 0.0
 
 block:
-  bufLen = buf.len()
-  if (bufLen < 2):
-    bufLen = 2
-
-  safeGrain = grainSize
-  if (safeGrain < 0.001):
-    safeGrain = 0.001
+  bufLen = f32(buf.len())
 
   sample:
-    if (phaseA >= safeGrain):
+    if phaseA >= grainSize:
       phaseA = 0.0
-      jphase = jphase + 0.61
+      jphase = wrap(jphase + 0.61, 0.0, TWO_PI)
       jitterA = sin(jphase) * 0.1
       startA = clamp((pos + jitterA) * bufLen, 0.0, bufLen - 1.0)
 
-    if (phaseB >= safeGrain):
+    if phaseB >= grainSize:
       phaseB = 0.0
-      jphase = jphase + 0.97
+      jphase = wrap(jphase + 0.97, 0.0, TWO_PI)
       jitterB = sin(jphase) * 0.1
       startB = clamp((pos + spread + jitterB) * bufLen, 0.0, bufLen - 1.0)
 
-    readPosA = startA + (phaseA * samplerate * rate)
-    readPosB = startB + (phaseB * samplerate * (rate * 0.97))
+    readPosA = startA + phaseA * SR * rate
+    readPosB = startB + phaseB * SR * rate * 0.97
 
-    wa = 0.5 * (1.0 - cos(twopi * phaseA / safeGrain))
-    wb = 0.5 * (1.0 - cos(twopi * phaseB / safeGrain))
+    windowA = 0.5 * (1.0 - cos(TWO_PI * phaseA / grainSize))
+    windowB = 0.5 * (1.0 - cos(TWO_PI * phaseB / grainSize))
 
-    sa = buf.readL(readPosA) * wa
-    sb = buf.readL(readPosB) * wb
-    out1 = (sa + sb) * 0.6
+    sampleA = buf.readLW(readPosA) * windowA
+    sampleB = buf.readLW(readPosB) * windowB
 
-    phaseA = phaseA + 1.0 / samplerate
-    phaseB = phaseB + 1.0 / samplerate
+    phaseA += 1.0 / SR
+    phaseB += 1.0 / SR
+
+    out1 = (sampleA + sampleB) * 0.6
 ";
 
     b = Buffer.read(s, ExampleFiles.child);

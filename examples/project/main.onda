@@ -1,12 +1,13 @@
 buffers:
-  waveform: buffer<f32>
+  waveform
 
 params:
-  freq = 220.0
+  freq = 220.0 {20.0, 2000.0}
 
 init:
   phase = 0.0
 
 sample:
-  out1 = waveform[phase]
-  phase = (phase + (freq * waveform.len() / samplerate)) % waveform.len()
+  frames = f32(waveform.len())
+  out1 = waveform.readLW(phase)
+  phase = wrap(phase + freq * frames / SR, 0.0, frames)

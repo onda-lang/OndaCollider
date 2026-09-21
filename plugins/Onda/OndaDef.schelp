@@ -1,71 +1,114 @@
 TITLE:: OndaDef
 summary:: Onda definition manager
 categories:: UGens>Onda
-related:: Classes/Onda
+related:: Classes/Onda, Classes/ControlSpec, Classes/NamedControl
 
 DESCRIPTION::
-OndaDef manages compile and lifetime commands for link::Classes/Onda:: programs and projects running on the SuperCollider server.
+OndaDef is the language-side owner of a compiled Onda definition. It associates a link::Classes/Symbol:: key with inline Onda source, an Onda source file, or an Onda project, and asks the link::Classes/Server:: plugin to compile it for the server's current sample rate and block size.
+
+OndaDef is not a link::Classes/UGen:: and does not process audio. After a successful compile it caches the SC-facing input and output metadata, registers itself by key, and can be passed directly to one or more link::Classes/Onda:: UGens. Onda can alternatively retrieve the current registered definition from its link::Classes/Symbol:: key. Sending another definition with the same key replaces the compiled server program and hot-swaps compatible running Onda UGens.
+
+Compilation is asynchronous. Use the action callback to create synths or perform work that depends on the compiled definition:
 
 code::
-OndaDef(\name, sourceOrPath).send;
+OndaDef(\name, sourceOrPath).send(s, { |definition|
+    { Onda.ar(definition) }.play;
+});
 ::
 
-Current host limits:
+An inline source string is written to a temporary code::.onda:: file before compilation. Use a code::.onda::/code::.on:: path when the program has relative source dependencies, and use an code::.ondaproject:: manifest for project-relative sources and buffer assets.
+
+SUBSECTION:: Definition lifetime
+
+Definitions live in the server plugin and must be sent after the server boots. A successful replacement under the same key reinitializes every attached Onda UGen. A failed compile leaves the previously published server program running. Calling code::free:: unloads the server definition; attached Onda UGens then output silence.
+
+SUBSECTION:: Cached metadata
+
+After compilation, link::Classes/OndaDef#-ins:: contains the ordered SC endpoint descriptors used by Onda. Each descriptor contains code::name::, code::rate::, and code::meta::. The metadata contains the endpoint code::kind:: and, when available, its code::init:: value. Ranged params also contain code::spec::, the same link::Classes/ControlSpec:: stored by name in link::Classes/OndaDef#-specs::. link::Classes/OndaDef#-outs:: is the flattened number of audio output channels.
+
+The generated specs preserve the Onda range, linear/logarithmic scale or curve, unit, step grid, and default. OndaDef does not register them globally or attach them to SynthDef controls. Use one explicitly when a control should carry that metadata:
+
+code::
+var cutoff = \cutoff.kr(spec: definition.specs[\cutoff]);
+Onda.ar(definition, (cutoff: cutoff));
+::
+
+The control and Onda UGen still exchange plain values; link::Classes/ControlSpec#-map:: and GUI widgets perform normalized mapping when requested.
+
+SUBSECTION:: Current limitations
 
 list::
-## `ins`, `params`, and `events` must be scalar.
-## `ins` must use `f32`; `params` may use any scalar primitive type.
-## `events` must use a single scalar primitive payload and fire whenever their control value changes.
-## `outs` must use `f32` endpoint types (`f32` or `f32[N]`).
-## Onda prints and top-level delegate occurrences are written to the SuperCollider server log. Capture is bounded per UGen; overflow or an unusually large formatted line produces a warning.
-## SC buffer overrides must be `buffer<f32...>` and are driven from control-rate `bufnum` inputs. Project-owned buffers may use any Onda primitive element type.
-## Buffer arrays require an `.ondaproject`, are omitted from `ins`, and cannot be overridden from SuperCollider.
+## Onda teletype::ins::, teletype::params::, and teletype::events:: must be scalar.
+## teletype::ins:: must use teletype::f32::; teletype::params:: may use any scalar primitive type.
+## teletype::events:: must use a single scalar primitive payload and fire whenever their control value changes.
+## teletype::outs:: must use teletype::f32:: endpoint types (teletype::f32:: or teletype::f32[N]::).
+## SC link::Classes/Buffer:: overrides must be teletype::buffer<f32...>:: and are driven from control-rate code::bufnum:: inputs. Project-owned buffers may use any Onda primitive element type.
+## Project-owned buffers with non-teletype::f32:: elements are omitted from teletype::ins:: and cannot be overridden from SuperCollider.
+## Buffer arrays require an code::.ondaproject::, are omitted from teletype::ins::, and cannot be overridden from SuperCollider.
+## Onda teletype::print(...):: output and top-level delegate occurrences are written to the link::Classes/Server:: log rather than delivered to sclang. Capture and formatting storage are bounded per Onda UGen.
+## A hot-swap must retain a compatible SC input interface and flattened output channel count. Relaunch link::Classes/Synth:: instances after changing the interface shape.
 ::
 
 CLASSMETHODS::
 
 METHOD:: new
-Create a new Onda definition.
+Create an uncompiled Onda definition. Call code::send:: after the target Server has booted.
 ARGUMENT:: key
-Unique link::Classes/Symbol:: for this definition.
+A link::Classes/Symbol:: used to register and later retrieve the definition.
 ARGUMENT:: source
-Inline Onda source string, `.onda`/`.on` file path, or `.ondaproject` manifest path.
+A link::Classes/String:: containing inline Onda source, a code::.onda::/code::.on:: file path, or a code::.ondaproject:: manifest path.
 
 METHOD:: free
-Free a specific definition by key.
+Free the definition registered under a key from the default Server.
+ARGUMENT:: key
+The definition's link::Classes/Symbol:: key.
 
 METHOD:: freeAll
-Free all compiled OndaDefs and clear the global dictionary.
+Free all registered definitions from the default Server and clear the language-side registry.
+
+METHOD:: all
+The link::Classes/IdentityDictionary:: of successfully compiled definitions, indexed by key.
 
 INSTANCEMETHODS::
 
 METHOD:: send
-Asynchronously compile on the server.
+Asynchronously compile and publish the definition on a Server. On success, metadata is cached, the definition is registered in code::OndaDef.all::, compatible running Onda UGens are hot-swapped, and the action is evaluated.
 ARGUMENT:: server
-Target link::Classes/Server::. Defaults to `Server.default`.
+Target link::Classes/Server::. Defaults to code::Server.default::.
 ARGUMENT:: action
-Optional function evaluated after successful compile.
+Optional link::Classes/Function:: evaluated after successful compilation with this OndaDef as its argument. It is not evaluated on failure.
 
 METHOD:: add
-Alias for `send`.
+Alias for code::send::.
 
 METHOD:: free
-Unload this definition on the server.
+Unload this definition from a Server and remove it from the language-side registry. Running Onda UGens attached to it become silent.
+ARGUMENT:: server
+Target link::Classes/Server::. Defaults to code::Server.default::.
 
 METHOD:: query
-Post cached input/output metadata.
+Post the key, definition id, generation, cached input descriptors, flattened output count, and parameter specs.
+
+METHOD:: key
+The definition's registration key.
 
 METHOD:: id
-Collision-free server definition id retained for the lifetime of the sclang process.
+Server definition id retained for this key for the lifetime of the sclang process.
 
 METHOD:: generation
 Latest compile/free generation sent for this definition key. Generations prevent stale asynchronous compiles from replacing newer requests.
 
+METHOD:: source
+The inline Onda source or resolved source/project path supplied at construction.
+
 METHOD:: ins
-Parsed input metadata array.
+Ordered SC endpoint metadata populated after a successful compile. This includes Onda inputs, params, events, and overridable buffers; project-only endpoints such as buffer arrays and non-teletype::f32:: buffers are omitted.
+
+METHOD:: specs
+A link::Classes/IdentityDictionary:: mapping each ranged param name to its generated link::Classes/ControlSpec::. Unranged params and other endpoint kinds are omitted. Specs are populated after successful compilation and are never registered or attached automatically.
 
 METHOD:: outs
-Flattened output channel count.
+Flattened audio output channel count populated after a successful compile.
 
 EXAMPLES::
 
@@ -74,23 +117,21 @@ code::
 s.waitForBoot {
 	var code = "
 params:
-  freq = 220.0 {20, 20000}
+  freq = 220.0 {20.0, 20000.0}
 
 init:
   phase = 0.0
 
 block:
-  incr = freq / samplerate
+  incr = freq / SR
   sample:
-    out1 = sin(f32(twopi) * phase)
-    phase = (phase + incr) % 1.0
+    out1 = sin(TWO_PI * phase)
+    phase = wrap(phase + incr, 0.0, 1.0)
 ";
-	
-    OndaDef(\sine, code).send;
-	
-	s.sync;
-	
-	{ Onda.ar(\sine, MouseX.kr(200, 1000, 1)).dup }.play;
+
+    OndaDef(\sine, code).send(s, { |definition|
+        { Onda.ar(definition, MouseX.kr(200, 1000, 1)).dup }.play;
+    });
 };
 )
 

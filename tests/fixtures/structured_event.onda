@@ -1,0 +1,11 @@
+struct Payload:
+  value: f32
+
+init:
+  output = 0.0
+
+event set(payload: Payload):
+  output = payload.value
+
+sample:
+  out1 = output

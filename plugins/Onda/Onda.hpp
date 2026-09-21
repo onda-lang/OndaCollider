@@ -4,6 +4,7 @@
 #include "onda.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,15 @@ enum class OndaInputKind : uint8_t {
     Param = 1,
     Event = 2,
     Buffer = 3,
+};
+
+struct OndaParamSpec {
+    double minimum = 0.0;
+    double maximum = 1.0;
+    int scale = ONDA_PARAM_SCALE_LINEAR;
+    std::optional<double> curve;
+    std::optional<double> step;
+    std::string unit;
 };
 
 struct OndaInputDescriptor {
@@ -28,6 +38,7 @@ struct OndaInputDescriptor {
     int bufferChannelsStatic = -1;
     bool bufferMayWrite = false;
     bool hasProjectDefault = false;
+    std::optional<OndaParamSpec> paramSpec;
 };
 
 class Onda;

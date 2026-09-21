@@ -1,0 +1,12 @@
+params:
+  cutoff = 440.0 {20.0, 20000.0, log, "Hz"}
+  envelope = 0.5 {0.0, 1.0, curve = -4.0, unit = "%/s"}
+  voices: i32 = 3 {1, 9, step = 2}
+  centered: f32 {-4.0, 4.0, step = 2.0}
+  plain = 0.000000125
+
+outs:
+  out1
+
+sample:
+  out1 = 0.0

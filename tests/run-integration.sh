@@ -73,6 +73,11 @@ if ! grep -Fq 'Onda: delegate observed(kind: 1, amount: 2.5)' "${SCLANG_LOG}"; t
     exit 1
 fi
 
+if ! grep -Fq 'typed event: 2.5' "${SCLANG_LOG}"; then
+    echo "Onda event print output did not reach the SuperCollider server log." >&2
+    exit 1
+fi
+
 if ! grep -Fq 'print occurrence exceeds the 2048-byte host formatting capacity' "${SCLANG_LOG}"; then
     echo "Onda did not safely reject oversized print formatting output." >&2
     exit 1

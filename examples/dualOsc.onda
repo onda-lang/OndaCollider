@@ -1,53 +1,36 @@
-def add_phase(p, inc, upper = twopi):
-  next = p + inc
-  if (next >= upper):
-    next = next - upper
-  return next
+import std/osc
 
 proc DualOsc<T>:
   params<T>:
     freq = 110.0
-    modDepth  = 1.5
+    modDepth = 1.5
     detune = 1.0
 
   outs<T> 2
 
   init<T>:
-    phaseA = 0.0
-    phaseB = 0.0
+    oscA = std::osc::Sine<T>()
+    oscB = std::osc::Sine<T>()
     lastA = 0.0
     lastB = 0.0
 
   sample 8:
-    incA = freq * twopi / samplerate
-    incB = (freq + detune) * twopi / samplerate
-
-    phaseA = add_phase(phaseA, incA)
-    phaseB = add_phase(phaseB, incB)
-
-    currentA = sin(phaseA + (lastB * modDepth))
-    currentB = sin(phaseB + (lastA * modDepth))
-
+    currentA = oscA(freq = freq, phase_offset = lastB * modDepth)
+    currentB = oscB(freq = freq + detune, phase_offset = lastA * modDepth)
+    lastA = currentA
+    lastB = currentB
     out1 = currentA
     out2 = currentB
 
-    lastA = currentA
-    lastB = currentB
-
 params:
-  freq = 110.0
-  modDepth = 1.5
-  detune = 1.0
+  freq = 110.0 {20.0, 1000.0}
+  modDepth = 1.5 {0.0, 20.0}
+  detune = 1.0 {0.0, 100.0}
 
 init:
-  osc = DualOsc<f64>(freq = freq, modDepth = modDepth, detune = detune)
+  osc = DualOsc<f64>()
 
-block:
-  osc.freq = freq
-  osc.modDepth = modDepth
-  osc.detune = detune
-
-  sample:
-    osc()
-    out1 = f32(osc.out1)
-    out2 = f32(osc.out2)
+sample:
+  osc1, osc2 = osc(freq = freq, modDepth = modDepth, detune = detune)
+  out1 = f32(osc1)
+  out2 = f32(osc2)

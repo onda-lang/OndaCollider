@@ -2,9 +2,9 @@ buffers:
   buf
 
 params:
-  rate = 1.0
-  pos = 0.5
-  grainSize = 0.1
+  rate = 1.0 {0.25, 5.0}
+  pos = 0.5 {0.0, 1.0}
+  grainSize = 0.1 {0.01, 0.3}
 
 init:
   start = 0.0
@@ -12,24 +12,18 @@ init:
   jphase = 0.0
 
 block:
-  bufLen = buf.len()
-  if (bufLen < 2):
-    bufLen = 2
-
-  safeGrain = grainSize
-  if (safeGrain < 0.001):
-    safeGrain = 0.001
+  bufLen = f32(buf.len())
 
   sample:
-    if (phase >= safeGrain):
+    if phase >= grainSize:
       phase = 0.0
-      jphase = jphase + 0.73
+      jphase = wrap(jphase + 0.73, 0.0, TWO_PI)
       jitter = sin(jphase) * 0.1
       start = clamp((pos + jitter) * bufLen, 0.0, bufLen - 1.0)
 
-    readPos = start + (phase * samplerate * rate)
+    readPos = start + phase * SR * rate
+    window = 0.5 * (1.0 - cos(TWO_PI * phase / grainSize))
 
-    w = 0.5 * (1.0 - cos(twopi * phase / safeGrain))
-    out1 = buf.readL(readPos) * w
+    phase += 1.0 / SR
 
-    phase = phase + 1.0 / samplerate
+    out1 = buf.readLW(readPos) * window

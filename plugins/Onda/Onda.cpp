@@ -2,7 +2,6 @@
 #include "Onda.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cstdarg>
 #include <cinttypes>
@@ -10,7 +9,9 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
 #include <limits>
+#include <locale>
 #include <memory>
 #include <new>
 #include <sstream>
@@ -92,35 +93,36 @@ T integerFromControl(float value) {
     return static_cast<T>(value);
 }
 
-bool packControlPrimitive(
+union ControlPrimitiveValue {
+    float f32;
+    double f64;
+    int32_t i32;
+    int64_t i64;
+    uint8_t boolean;
+};
+
+const void* controlPrimitiveData(
     float value,
     int elemType,
-    std::array<uint8_t, sizeof(double)>& payload) {
-    payload.fill(0);
+    ControlPrimitiveValue& converted) {
     switch (elemType) {
         case ONDA_PRIMITIVE_F32:
-            std::memcpy(payload.data(), &value, sizeof(value));
-            return true;
-        case ONDA_PRIMITIVE_F64: {
-            const double converted = static_cast<double>(value);
-            std::memcpy(payload.data(), &converted, sizeof(converted));
-            return true;
-        }
-        case ONDA_PRIMITIVE_I32: {
-            const int32_t converted = integerFromControl<int32_t>(value);
-            std::memcpy(payload.data(), &converted, sizeof(converted));
-            return true;
-        }
-        case ONDA_PRIMITIVE_I64: {
-            const int64_t converted = integerFromControl<int64_t>(value);
-            std::memcpy(payload.data(), &converted, sizeof(converted));
-            return true;
-        }
+            converted.f32 = value;
+            return &converted.f32;
+        case ONDA_PRIMITIVE_F64:
+            converted.f64 = static_cast<double>(value);
+            return &converted.f64;
+        case ONDA_PRIMITIVE_I32:
+            converted.i32 = integerFromControl<int32_t>(value);
+            return &converted.i32;
+        case ONDA_PRIMITIVE_I64:
+            converted.i64 = integerFromControl<int64_t>(value);
+            return &converted.i64;
         case ONDA_PRIMITIVE_BOOL:
-            payload[0] = value >= 0.5f ? 1 : 0;
-            return true;
+            converted.boolean = value >= 0.5f ? 1 : 0;
+            return &converted.boolean;
         default:
-            return false;
+            return nullptr;
     }
 }
 
@@ -261,6 +263,101 @@ const char* inputKindToTag(OndaInputKind kind) {
     }
 
     return "0";
+}
+
+bool readParamSpec(
+    onda_program_t* program,
+    int index,
+    std::optional<OndaParamSpec>& result,
+    std::string& error) {
+    const int hasRange = onda_param_has_range(program, index);
+    if (hasRange == 0) {
+        return true;
+    }
+    if (hasRange < 0) {
+        error = "Failed to query parameter range metadata.";
+        return false;
+    }
+
+    OndaParamSpec spec;
+    spec.minimum = onda_param_range_min_f64(program, index);
+    spec.maximum = onda_param_range_max_f64(program, index);
+    spec.scale = onda_param_scale(program, index);
+    if (!std::isfinite(spec.minimum)
+        || !std::isfinite(spec.maximum)
+        || (spec.scale != ONDA_PARAM_SCALE_LINEAR && spec.scale != ONDA_PARAM_SCALE_LOG)) {
+        error = "Invalid parameter control domain metadata.";
+        return false;
+    }
+
+    const int hasCurve = onda_param_has_curve(program, index);
+    if (hasCurve < 0) {
+        error = "Failed to query parameter curve metadata.";
+        return false;
+    }
+    if (hasCurve > 0) {
+        const double curve = onda_param_curve(program, index);
+        if (!std::isfinite(curve)) {
+            error = "Invalid parameter curve metadata.";
+            return false;
+        }
+        spec.curve = curve;
+    }
+
+    const int hasStep = onda_param_has_step(program, index);
+    if (hasStep < 0) {
+        error = "Failed to query parameter step metadata.";
+        return false;
+    }
+    if (hasStep > 0) {
+        const double step = onda_param_step_f64(program, index);
+        if (!std::isfinite(step) || step <= 0.0) {
+            error = "Invalid parameter step metadata.";
+            return false;
+        }
+        spec.step = step;
+    }
+
+    const int unitBytes = onda_param_unit_copy(program, index, nullptr, 0);
+    if (unitBytes < 0) {
+        error = "Failed to query parameter unit metadata.";
+        return false;
+    }
+    if (unitBytes > 0) {
+        std::vector<char> unit(static_cast<size_t>(unitBytes));
+        if (onda_param_unit_copy(program, index, unit.data(), unitBytes) != unitBytes) {
+            error = "Failed to copy parameter unit metadata.";
+            return false;
+        }
+        spec.unit.assign(unit.data());
+    }
+
+    result = std::move(spec);
+    return true;
+}
+
+std::string encodeReplyField(const std::string& value) {
+    std::string encoded;
+    encoded.reserve(value.size() + 1);
+    encoded.push_back('~');
+    for (const char character : value) {
+        if (character == '%') {
+            encoded += "%25";
+        } else if (character == '/') {
+            encoded += "%2F";
+        } else {
+            encoded.push_back(character);
+        }
+    }
+    return encoded;
+}
+
+template <typename T>
+void appendReplyNumber(std::string& reply, T value) {
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream << std::setprecision(std::numeric_limits<T>::max_digits10) << value;
+    reply += stream.str();
 }
 
 int scBufferIndex(float value) {
@@ -462,6 +559,13 @@ bool buildProgramMetadata(
             desc.init = static_cast<float>(onda_param_default_f64(compiled.program, i));
         }
 
+        if (!readParamSpec(compiled.program, i, desc.paramSpec, error)) {
+            const char* name = onda_param_name(compiled.program, i);
+            const std::string paramName = name ? name : std::to_string(i);
+            error += " Parameter: '" + paramName + "'.";
+            return false;
+        }
+
         compiled.inputs.push_back(std::move(desc));
     }
 
@@ -480,18 +584,21 @@ bool buildProgramMetadata(
             return false;
         }
 
-        const int payloadBytes = onda_event_payload_bytes(compiled.program, i);
-        const int elemType = onda_event_param_elem_type(compiled.program, i, 0);
-        const int arrayLen = onda_event_param_array_len(compiled.program, i, 0);
-        const int isArray = onda_event_param_is_array(compiled.program, i, 0);
-        const int isSlice = onda_event_param_is_slice(compiled.program, i, 0);
+        onda_event_tensor_info_t tensor{};
+        const int tensorCount = onda_event_tensor_count(compiled.program, i);
+        const bool hasTensorInfo = tensorCount == 1
+            && onda_event_tensor_info(compiled.program, i, 0, &tensor) == 0;
+        const int elemType = hasTensorInfo ? tensor.element_type : -1;
         const int elemBytes = primitiveByteSize(elemType);
 
+        // Aggregate leaf paths contain a dot; a top-level primitive path is just its parameter.
         if (elemBytes < 0
-            || payloadBytes != elemBytes
-            || arrayLen != 1
-            || isArray != 0
-            || isSlice != 0) {
+            || !tensor.path
+            || std::strchr(tensor.path, '.')
+            || tensor.parameter_index != 0
+            || tensor.shape_rank != 0
+            || tensor.is_slice != 0
+            || tensor.fixed_element_count != 1) {
             std::ostringstream msg;
             msg << "Host constraint: event '";
             if (const char* name = onda_event_name(compiled.program, i)) {
@@ -666,7 +773,7 @@ void writeReply(
     int definitionId,
     int generation,
     const CompiledProgram& compiled) {
-    reply = "_onda/";
+    reply = "_onda/2/";
     reply += std::to_string(definitionId);
     reply += "/";
     reply += std::to_string(generation);
@@ -681,7 +788,24 @@ void writeReply(
         reply += "/";
         reply += inputKindToTag(input.kind);
         reply += input.hasInit ? "/1/" : "/0/";
-        reply += std::to_string(input.hasInit ? input.init : 0.0f);
+        appendReplyNumber(reply, input.hasInit ? input.init : 0.0f);
+        reply += input.paramSpec ? "/1" : "/0";
+
+        if (input.paramSpec) {
+            const OndaParamSpec& spec = *input.paramSpec;
+            reply += "/";
+            appendReplyNumber(reply, spec.minimum);
+            reply += "/";
+            appendReplyNumber(reply, spec.maximum);
+            reply += "/";
+            reply += (spec.scale == ONDA_PARAM_SCALE_LOG) ? "exp" : "lin";
+            reply += spec.curve ? "/1/" : "/0/";
+            appendReplyNumber(reply, spec.curve.value_or(0.0));
+            reply += spec.step ? "/1/" : "/0/";
+            appendReplyNumber(reply, spec.step.value_or(0.0));
+            reply += "/";
+            reply += encodeReplyField(spec.unit);
+        }
     }
 
     reply += "/";
@@ -701,7 +825,7 @@ void writeFailureReply(OndaCompileCmdData& cmdData) {
     std::snprintf(
         cmdData.replyMsg,
         sizeof(cmdData.replyMsg),
-        "_onda/%d/%d/_fail",
+        "_onda/2/%d/%d/_fail",
         cmdData.definitionId,
         cmdData.generation);
 }
@@ -1145,7 +1269,7 @@ bool Onda::initializeInstance() {
         return false;
     }
 
-    const int result = onda_init(mInstance, ONDA_INIT_FULL, executionOutput());
+    const int result = onda_init_checked(mInstance, ONDA_INIT_FULL, executionOutput());
     flushExecutionOutput();
 #if SUPERNOVA
     releaseBufferLocks();
@@ -2061,8 +2185,9 @@ bool Onda::prepareParams() {
         const float value = (scSlot > 0) ? in0(scSlot) : fallback;
 
         if (!state.initialized || state.previousValue != value) {
-            std::array<uint8_t, sizeof(double)> payload{};
-            if (!packControlPrimitive(value, desc.elemType, payload)) {
+            ControlPrimitiveValue converted{};
+            const void* data = controlPrimitiveData(value, desc.elemType, converted);
+            if (!data) {
                 Print(
                     "ERROR: Onda (definition %d, instance %d): param '%s' has an unsupported type.\n",
                     mDefinitionId,
@@ -2071,7 +2196,7 @@ bool Onda::prepareParams() {
                 return false;
             }
 
-            if (onda_set_param_by_index(mInstance, desc.ondaIndex, payload.data(), desc.elemBytes) != 0) {
+            if (onda_set_param_by_index(mInstance, desc.ondaIndex, data, desc.elemBytes) != 0) {
                 Print("ERROR: Onda (definition %d, instance %d): failed to set param '%s'.\n", mDefinitionId, mUnitIndex, desc.name.c_str());
                 return false;
             }
@@ -2094,8 +2219,9 @@ bool Onda::triggerEvents() {
         state.previousValue = value;
 
         if (triggered) {
-            std::array<uint8_t, sizeof(double)> payload{};
-            if (!packControlPrimitive(value, desc.elemType, payload)) {
+            ControlPrimitiveValue converted{};
+            const void* data = controlPrimitiveData(value, desc.elemType, converted);
+            if (!data) {
                 Print(
                     "ERROR: Onda (definition %d, instance %d): event '%s' has an unsupported payload type.\n",
                     mDefinitionId,
@@ -2104,11 +2230,11 @@ bool Onda::triggerEvents() {
                 return false;
             }
 
-            const int result = onda_trigger_event_by_index(
+            const onda_event_tensor_view_t view{data, 1};
+            const int result = onda_trigger_event_views_by_index_unchecked(
                 mInstance,
                 desc.ondaIndex,
-                payload.data(),
-                desc.elemBytes,
+                &view,
                 executionOutput());
             flushExecutionOutput();
             if (result != 0) {
@@ -2217,13 +2343,6 @@ bool Onda::processAudio(int nSamples) {
         return false;
     }
 
-    if (!triggerEvents()) {
-#if SUPERNOVA
-        releaseBufferLocks();
-#endif
-        return false;
-    }
-
     if (!prepareOutputs()) {
 #if SUPERNOVA
         releaseBufferLocks();
@@ -2245,9 +2364,16 @@ bool Onda::processAudio(int nSamples) {
         mBindingsNeedValidate = false;
     }
 
+    if (!triggerEvents()) {
+#if SUPERNOVA
+        releaseBufferLocks();
+#endif
+        return false;
+    }
+
     const int processResult = onda_process_unchecked(mInstance, executionOutput());
     flushExecutionOutput();
-    
+
 #if SUPERNOVA
     releaseBufferLocks();
 #endif
@@ -2260,7 +2386,7 @@ bool Onda::processAudio(int nSamples) {
     if (mNeedsOutputCopy) {
         copyOutputsToSC(nSamples);
     }
-    
+
     return true;
 }
 

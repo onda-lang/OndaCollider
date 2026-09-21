@@ -42,9 +42,10 @@ server.waitForBoot {
         var aliasDef, lifetimeBus, lifetimeSynth, dualDef, dualSynth, replacementDualSynth;
         var eventDef, eventBus, eventSynth;
         var typedDef, typedBus, typedSynth, loggingBus, loggingSynth;
+        var specDef, cutoffSpec, envelopeSpec, voicesSpec, centeredSpec, implicitSpecDef, explicitSpecDef;
         var longPrintDef, longPrintBus, longPrintSynth, longPrintSource;
         var projectDef, projectBus, projectSynth, overrideBuffer, done;
-        var arrayDef, badArrayDef, invalidDef;
+        var arrayDef, badArrayDef, badStructuredDef, invalidDef;
         var requiredDef, requiredBus, requiredSynth;
 
         assert = { |condition, message|
@@ -120,11 +121,9 @@ server.waitForBoot {
                 Out.kr(resultBus, A2K.kr(Onda.ar(\eventEdge, (bump: eventValue))));
             }).add;
             server.sync;
-            eventSynth = Synth(\ondaEventEdgeTest, [\resultBus, eventBus.index]);
+            eventSynth = Synth(\ondaEventEdgeTest, [\resultBus, eventBus.index, \eventValue, 2.0]);
             0.1.wait;
-            eventSynth.set(\eventValue, 2.0);
-            0.1.wait;
-            assertClose.(readBus.(eventBus), 2.0, "a changed event control should trigger once");
+            assertClose.(readBus.(eventBus), 2.0, "an initial nonzero event should trigger after unchecked dispatch preparation");
             0.1.wait;
             assertClose.(readBus.(eventBus), 2.0, "an unchanged event control must not retrigger each block");
             eventSynth.set(\eventValue, 3.0);
@@ -146,6 +145,41 @@ server.waitForBoot {
             assertClose.(typedDef.ins[1][\meta][\init], 2.0, "i32 param defaults should cross the SC metadata boundary");
             assertClose.(typedDef.ins[2][\meta][\init], 3.0, "i64 param defaults should cross the SC metadata boundary");
             assertClose.(typedDef.ins[3][\meta][\init], 0.0, "bool param defaults should cross the SC metadata boundary");
+
+            specDef = compile.(\paramSpecs, fixtures +/+ "param_specs.onda");
+            assert.(specDef.specs.size == 4, "only ranged params should expose ControlSpecs");
+            cutoffSpec = specDef.specs[\cutoff];
+            envelopeSpec = specDef.specs[\envelope];
+            voicesSpec = specDef.specs[\voices];
+            centeredSpec = specDef.specs[\centered];
+            assert.(cutoffSpec.isKindOf(ControlSpec), "a ranged param should expose a ControlSpec");
+            assert.(specDef.ins[0][\meta][\spec] === cutoffSpec, "input metadata and specs should share the same ControlSpec");
+            assertClose.(cutoffSpec.minval, 20.0, "ControlSpec minimum should match Onda metadata");
+            assertClose.(cutoffSpec.maxval, 20000.0, "ControlSpec maximum should match Onda metadata");
+            assert.(cutoffSpec.warp.asSpecifier == \exp, "logarithmic Onda params should use exponential ControlSpecs");
+            assertClose.(cutoffSpec.default, 440.0, "ControlSpec default should match the Onda param default");
+            assert.(cutoffSpec.units == "Hz", "ControlSpec units should match Onda metadata");
+            assertClose.(envelopeSpec.warp.asSpecifier, -4.0, "curved Onda params should use numeric ControlSpec warps");
+            assert.(envelopeSpec.units == "%/s", "unit transport should preserve delimiters and percent signs");
+            assertClose.(voicesSpec.step, 2.0, "ControlSpec step should match Onda metadata");
+            assertClose.(voicesSpec.map(0.0), 1.0, "stepped ControlSpecs should start on the Onda grid");
+            assertClose.(voicesSpec.map(0.25), 3.0, "stepped ControlSpecs should snap relative to the Onda minimum");
+            assertClose.(centeredSpec.default, 0.0, "an implicit Onda param default should populate its ControlSpec");
+            assert.(specDef.specs[\plain].isNil, "unranged params should not expose ControlSpecs");
+            assert.((specDef.ins[4][\meta][\init] - 0.000000125).abs < 0.0000000001,
+                "small param defaults should cross the metadata boundary without collapsing to zero");
+
+            implicitSpecDef = SynthDef(\ondaImplicitSpecTest, {
+                var cutoff = \cutoff.kr(440);
+                Onda.ar(specDef, (cutoff: cutoff));
+            });
+            assert.(implicitSpecDef.specs[\cutoff].isNil, "Onda.ar must not attach specs implicitly");
+
+            explicitSpecDef = SynthDef(\ondaExplicitSpecTest, {
+                var cutoff = \cutoff.kr(spec: specDef.specs[\cutoff]);
+                Onda.ar(specDef, (cutoff: cutoff));
+            });
+            assert.(explicitSpecDef.specs[\cutoff] === cutoffSpec, "users should be able to attach Onda specs explicitly");
 
             loggingBus = Bus.control(server, 1);
             SynthDef(\ondaLoggingMemoryTest, { |resultBus = 0|
@@ -267,6 +301,11 @@ server.waitForBoot {
             badArrayDef.send(server);
             0.5.wait;
             assert.(OndaDef.all[\plainArray].isNil, "plain-source buffer arrays must be rejected");
+
+            badStructuredDef = OndaDef(\structuredEvent, fixtures +/+ "structured_event.onda");
+            badStructuredDef.send(server);
+            0.5.wait;
+            assert.(OndaDef.all[\structuredEvent].isNil, "structured events must be rejected even when their flattened payload is scalar");
 
             requiredDef = compile.(\requiredBuffer, fixtures +/+ "required_buffer.onda");
             requiredBus = Bus.control(server, 1);

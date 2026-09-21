@@ -1,33 +1,24 @@
-import std/data
+const DelayCapacity = i32(SR)
 
 params:
-  drive = 1.0
-  delayTime = 0.2
-  feedback = 0.5
+  drive = 1.0 {1.0, 20.0}
+  delayTime = 0.2 {1.0 / SR, f32(DelayCapacity - 1) / SR}
+  feedback = 0.5 {0.0, 0.99}
 
 init:
-  data = std::data::Data()
-  dataLen = data.len()
-  writePos = 0
+  delayLine: f32[DelayCapacity]
+  writePos = 0 {DelayCapacity, wrap}
 
 block:
-  delaySamples = i32(delayTime * samplerate)
-  if (delaySamples < 1):
-    delaySamples = 1
-  if (delaySamples >= dataLen):
-    delaySamples = dataLen - 1
-  
+  delaySamples = i32(delayTime * SR) {1..DelayCapacity}
+
   sample:
-    readPos = writePos - delaySamples
-    if (readPos < 0):
-      readPos = readPos + dataLen
+    readPos = (writePos - delaySamples) {DelayCapacity, wrap}
 
     distorted = tanh(in1 * drive)
-    delayed = data.read(readPos)
+    delayed = delayLine[readPos]
 
-    data.write(writePos, distorted + delayed * feedback)
-    writePos = writePos + 1
-    if (writePos >= dataLen):
-      writePos = 0
+    delayLine[writePos] = distorted + delayed * feedback
+    writePos += 1
 
     out1 = delayed + distorted
