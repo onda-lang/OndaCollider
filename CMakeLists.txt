@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 set(project_name "Onda")
 
+if(CMAKE_HOST_APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
+endif()
+
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/ondacollider-version" ONDACOLLIDER_VERSION LIMIT_COUNT 1)
 string(STRIP "${ONDACOLLIDER_VERSION}" ONDACOLLIDER_VERSION)
 if(ONDACOLLIDER_VERSION STREQUAL "")
@@ -36,6 +40,9 @@ message(STATUS "Building for SuperCollider version: ${SC_VERSION}")
 
 project(${project_name} VERSION "${ONDACOLLIDER_VERSION}")
 message(STATUS "Building OndaCollider version: ${PROJECT_VERSION}")
+if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "11.0")
+    message(FATAL_ERROR "Apple Silicon requires macOS 11.0 or later")
+endif()
 sc_do_initial_compiler_config()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -83,6 +90,19 @@ find_package(Onda CONFIG REQUIRED
         "${ONDA_SDK_PATH}/lib/cmake/Onda"
     NO_DEFAULT_PATH
 )
+if(APPLE)
+    get_target_property(ONDA_STATIC_LIBRARY Onda::Static IMPORTED_LOCATION)
+    execute_process(
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-macos-deployment-target.sh"
+            "${CMAKE_OSX_DEPLOYMENT_TARGET}" "${ONDA_STATIC_LIBRARY}"
+        RESULT_VARIABLE ONDA_SDK_TARGET_RESULT)
+    if(NOT ONDA_SDK_TARGET_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "The Onda SDK requires a newer macOS version than "
+            "${CMAKE_OSX_DEPLOYMENT_TARGET}; rebuild the SDK with "
+            "MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    endif()
+endif()
 
 # ------------------------------------------------------------------
 # 3. DEFINE PLUGIN TARGET
@@ -119,6 +139,12 @@ function(finalize_target target_name)
     if(TARGET ${target_name})
         message(STATUS "Configuring target: ${target_name}")
         target_link_libraries(${target_name} PRIVATE Onda::Static)
+        if(APPLE)
+            add_custom_command(TARGET ${target_name} POST_BUILD
+                COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-macos-deployment-target.sh"
+                    "${CMAKE_OSX_DEPLOYMENT_TARGET}" "$<TARGET_FILE:${target_name}>"
+                VERBATIM)
+        endif()
         target_compile_definitions(
             ${target_name}
             PRIVATE

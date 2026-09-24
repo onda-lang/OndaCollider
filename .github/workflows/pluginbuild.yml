@@ -1,5 +1,8 @@
 name: Build OndaCollider
 
+env:
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
 on:
   push:
     tags:

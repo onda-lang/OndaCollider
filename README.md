@@ -54,6 +54,9 @@ When using a local Onda repo, the build uses:
   - `include/onda.h`
   - `target/release/onda.lib` on Windows or `target/release/libonda.a` on Unix
 
+The Apple Silicon build targets macOS 11.0 or later, matching SuperCollider
+3.14.1. The Onda SDK must be built for the same or an earlier deployment target.
+
 Supported SDK asset patterns:
 
 - `onda-<version>-linux-x64.tar.xz`
