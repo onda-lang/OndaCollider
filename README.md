@@ -10,16 +10,16 @@ SuperCollider plugin to run the [Onda](https://github.com/onda-lang/onda) audio 
 
 Default flow: download the pinned Onda SDK and install the plugin.
 
-Windows:
-
-```bat
-build.bat "C:\path\to\supercollider" "C:\path\to\Extensions"
-```
-
 Unix:
 
 ```bash
 ./build.sh /path/to/supercollider /path/to/Extensions
+```
+
+Windows:
+
+```bat
+build.bat "C:\path\to\supercollider" "C:\path\to\Extensions"
 ```
 
 If the Onda SDK path is omitted, the build scripts download the release pinned in [`onda-version`](onda-version) for the current platform into `build/onda-sdk`.
@@ -27,18 +27,17 @@ Set `ONDA_VERSION` to select a different release tag without changing the pin. C
 
 To use a local Onda checkout/build instead of the downloaded SDK, pass the Onda repo path explicitly and the install destination as the third argument.
 
-Windows:
-
-```bat
-build.bat "C:\path\to\supercollider" "C:\path\to\onda" "C:\path\to\Extensions"
-```
-
 Unix:
 
 ```bash
 ./build.sh /path/to/supercollider /path/to/onda /path/to/Extensions
 ```
 
+Windows:
+
+```bat
+build.bat "C:\path\to\supercollider" "C:\path\to\onda" "C:\path\to\Extensions"
+```
 When using a local Onda repo, the build uses:
 
 - `include/onda.h`
