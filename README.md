@@ -5,6 +5,7 @@
 SuperCollider plugin to run the [Onda](https://github.com/onda-lang/onda) audio programming language in `scsynth`/`supernova`.
 
 [Pre-built binaries](https://github.com/onda-lang/OndaCollider/releases) are available for Windows, macOS and Linux.
+The pre-built macOS binaries are not signed.
 
 ## Build
 
