@@ -2428,7 +2428,7 @@ void Onda::nextSilence(int nSamples) {
 PluginLoad(OndaUGens) {
     ft = inTable;
     registerUnit<Onda>(ft, "Onda", true); // Onda assumes no aliasing between buffers
-    Print("OndaCollider %s: using Onda %s.\n", ONDACOLLIDER_VERSION, ONDACOLLIDER_ONDA_VERSION);
+    Print("OndaCollider %s: using Onda %s.\n", ONDACOLLIDER_VERSION, onda_version());
 
     Onda::patchStorage.resize(kMaxDefinitionId);
 

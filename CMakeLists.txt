@@ -73,17 +73,6 @@ endif()
 set(ONDA_SDK_PATH "${ONDA_SDK_PATH}" CACHE PATH "Path to extracted Onda SDK")
 set(ONDA_SYSTEM_LIBS "" CACHE STRING "Additional system libs needed by the Onda static library")
 
-set(ONDA_VERSION_FILE "${ONDA_SDK_PATH}/.onda-version")
-if(NOT EXISTS "${ONDA_VERSION_FILE}")
-    set(ONDA_VERSION_FILE "${CMAKE_SOURCE_DIR}/onda-version")
-endif()
-file(STRINGS "${ONDA_VERSION_FILE}" ONDA_BUILD_VERSION LIMIT_COUNT 1)
-string(STRIP "${ONDA_BUILD_VERSION}" ONDA_BUILD_VERSION)
-if(ONDA_BUILD_VERSION STREQUAL "")
-    message(FATAL_ERROR "Could not determine the Onda SDK version from ${ONDA_VERSION_FILE}")
-endif()
-message(STATUS "Building with Onda version: ${ONDA_BUILD_VERSION}")
-
 find_package(Onda CONFIG REQUIRED
     PATHS
         "${ONDA_SDK_PATH}/cmake"
@@ -149,7 +138,6 @@ function(finalize_target target_name)
             ${target_name}
             PRIVATE
                 ONDACOLLIDER_VERSION="${PROJECT_VERSION}"
-                ONDACOLLIDER_ONDA_VERSION="${ONDA_BUILD_VERSION}"
         )
         if(ONDA_SYSTEM_LIBS)
             target_link_libraries(${target_name} PRIVATE ${ONDA_SYSTEM_LIBS})

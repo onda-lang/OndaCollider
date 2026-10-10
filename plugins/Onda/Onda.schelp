@@ -89,17 +89,17 @@ s.waitForBoot({
     var code = "
 import std/osc
 
-proc DualOsc<T>:
-  params<T>:
+proc DualOsc:
+  params:
     freq = 110.0
     modDepth = 1.5
     detune = 1.0
 
-  outs<T> 2
+  outs 2
 
-  init<T>:
-    oscA = std::osc::Sine<T>()
-    oscB = std::osc::Sine<T>()
+  init:
+    oscA = std::osc::Sine()
+    oscB = std::osc::Sine()
     lastA = 0.0
     lastB = 0.0
 
@@ -117,12 +117,12 @@ params:
   detune = 1.0 {0.0, 100.0}
 
 init:
-  osc = DualOsc<f64>()
+  osc = DualOsc()
 
 sample:
   osc1, osc2 = osc(freq = freq, modDepth = modDepth, detune = detune)
-  out1 = f32(osc1)
-  out2 = f32(osc2)
+  out1 = osc1
+  out2 = osc2
 ";
 
     OndaDef(\dualOsc, code).send(s, {
