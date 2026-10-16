@@ -25,6 +25,7 @@ OndaDef {
 	var <generation;
 	var <source;
 	var sourcePath;
+	var <fastMath;
 
 	var <ins;
 	var <outs;
@@ -37,8 +38,8 @@ OndaDef {
 		nextDefinitionId = 0;
 	}
 
-	*new { |key, source|
-		^super.new.init(key, source);
+	*new { |key, source, fastMath = false|
+		^super.new.init(key, source, fastMath);
 	}
 
 	*definitionIdFor { |key|
@@ -73,11 +74,12 @@ OndaDef {
 		^next
 	}
 
-	init { |argKey, argSource|
+	init { |argKey, argSource, argFastMath|
 		var src, srcPath, isSourcePath;
 
 		key = argKey.asSymbol;
 		id = this.class.definitionIdFor(key);
+		fastMath = argFastMath;
 		specs = IdentityDictionary.new;
 
 		src = argSource.asString;
@@ -218,7 +220,7 @@ OndaDef {
 				}, '/done', server.addr);
 
 				server.sendMsg(
-					"/cmd", "onda_compile", id, compileGeneration, compilePath);
+					"/cmd", "onda_compile", id, compileGeneration, compilePath, fastMath.asInteger);
 				cond.hang;
 			} {
 				if(oscFunc.notNil) { oscFunc.free };

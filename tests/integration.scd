@@ -47,6 +47,7 @@ server.waitForBoot {
         var projectDef, projectBus, projectSynth, overrideBuffer, done;
         var arrayDef, badArrayDef, badStructuredDef, invalidDef;
         var requiredDef, requiredBus, requiredSynth;
+        var fastMathDef, fastMathBus, fastMathSynth;
 
         assert = { |condition, message|
             if(condition.not) { Error("OndaCollider integration test failed: " ++ message).throw };
@@ -54,9 +55,9 @@ server.waitForBoot {
         assertClose = { |actual, expected, message|
             assert.((actual - expected).abs < 0.0001, "% (expected %, got %)".format(message, expected, actual));
         };
-        compile = { |key, path|
+        compile = { |key, path, fastMath = false|
             var result;
-            OndaDef(key, path).send(server, { |definition|
+            OndaDef(key, path, fastMath: fastMath).send(server, { |definition|
                 result = definition;
             });
             result
@@ -78,6 +79,28 @@ server.waitForBoot {
             stableA = OndaDef(\stableId, "outs:\n  out1\nsample:\n  out1 = 0.0");
             stableB = OndaDef(\stableId, "outs:\n  out1\nsample:\n  out1 = 1.0");
             assert.(stableA.id == stableB.id, "a key must retain its definition id");
+            assert.(stableA.fastMath == false, "fast math should default to disabled");
+
+            fastMathDef = compile.(\fastMath, fixtures +/+ "fast_math.onda");
+            fastMathBus = Bus.control(server, 1);
+            SynthDef(\ondaFastMathTest, { |resultBus = 0|
+                Out.kr(resultBus, A2K.kr(Onda.ar(\fastMath)));
+            }).add;
+            server.sync;
+            fastMathSynth = Synth(\ondaFastMathTest, [\resultBus, fastMathBus.index]);
+            0.1.wait;
+            assertClose.(readBus.(fastMathBus), 0.0, "default compilation should preserve floating-point rounding");
+
+            fastMathDef = compile.(\fastMath, fixtures +/+ "fast_math.onda", true);
+            assert.(fastMathDef.fastMath, "the definition should retain its fast-math setting");
+            0.1.wait;
+            assertClose.(readBus.(fastMathBus), 1.0, "fast math should enable reassociation in the server compiler");
+
+            fastMathDef = compile.(\fastMath, File.readAllString(fixtures +/+ "fast_math.onda"), false);
+            0.1.wait;
+            assertClose.(readBus.(fastMathBus), 0.0, "inline-source replacement should disable fast math when requested");
+            fastMathSynth.free;
+            fastMathBus.free;
 
             aliasDef = compile.(\sourceAlias, fixtures +/+ "source_alias.on");
             assert.(aliasDef.outs == 1, ".on source files should compile through Onda's filesystem entry point");
@@ -258,7 +281,7 @@ server.waitForBoot {
             assert.(OndaDef.all[\eventEdge] === eventDef, "a failed replacement must retain the last good definition");
             assertClose.(readBus.(eventBus), 4.0, "a failed replacement must retain the running server program");
 
-            projectDef = compile.(\projectDefaults, fixtures +/+ "project_defaults" +/+ "project.ondaproject");
+            projectDef = compile.(\projectDefaults, fixtures +/+ "project_defaults" +/+ "project.ondaproject", true);
             assert.(projectDef.ins.size == 1, "non-f32 project buffers should remain project-owned");
             assert.(projectDef.ins[0][\name] == \waveform, "the overridable f32 project buffer should be exposed");
             assert.(projectDef.ins[0][\meta][\kind] == \buffer, "buffer metadata kind should be preserved");

@@ -1,0 +1,8 @@
+params:
+  value = 16777216.0
+
+outs:
+  out1
+
+sample:
+  out1 = (value + 1.0) - value

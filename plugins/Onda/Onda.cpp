@@ -816,6 +816,7 @@ struct OndaCompileCmdData {
     int definitionId = 0;
     int generation = 0;
     char* path = nullptr;
+    bool fastMath = false;
     char replyMsg[kMaxReplySize + 1] = {0};
     CompiledProgram* newProgram = nullptr;
     CompiledProgram* oldProgram = nullptr;
@@ -939,7 +940,7 @@ bool ondaCompileStage2Impl(World* world, void* inUserData) {
         return true;
     }
     onda_compile_options_t compileOptions{};
-    compileOptions.fast_math = 0;
+    compileOptions.fast_math = cmdData->fastMath;
     compileOptions.sample_rate = static_cast<float>(world->mSampleRate);
     compileOptions.block_size = world->mBufLength;
 
@@ -1045,6 +1046,7 @@ void ondaCompile(World* inWorld, void* /*inUserData*/, struct sc_msg_iter* args,
     cmdData->definitionId = args->geti();
     cmdData->generation = args->geti();
     const char* path = args->gets();
+    cmdData->fastMath = args->geti() != 0;
 
     if (path) {
         const size_t len = std::strlen(path);

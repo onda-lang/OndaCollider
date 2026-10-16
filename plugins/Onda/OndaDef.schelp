@@ -57,6 +57,12 @@ ARGUMENT:: key
 A link::Classes/Symbol:: used to register and later retrieve the definition.
 ARGUMENT:: source
 A link::Classes/String:: containing inline Onda source, a code::.onda::/code::.on:: file path, or a code::.ondaproject:: manifest path.
+ARGUMENT:: fastMath
+Enable Onda's LLVM fast-math optimizations. Defaults to code::false::. Applies to inline source, source files, and projects. Fast math relaxes floating-point rules and can change numerical results.
+
+code::
+OndaDef(\voice, "/path/to/voice.onda", fastMath: true).send;
+::
 
 METHOD:: free
 Free the definition registered under a key from the default Server.
@@ -100,6 +106,9 @@ Latest compile/free generation sent for this definition key. Generations prevent
 
 METHOD:: source
 The inline Onda source or resolved source/project path supplied at construction.
+
+METHOD:: fastMath
+The fast-math compilation setting supplied at construction.
 
 METHOD:: ins
 Ordered SC endpoint metadata populated after a successful compile. This includes Onda inputs, params, events, and overridable buffers; project-only endpoints such as buffer arrays and non-teletype::f32:: buffers are omitted.
