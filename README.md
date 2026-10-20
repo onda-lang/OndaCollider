@@ -7,63 +7,6 @@ SuperCollider plugin to run the [Onda](https://github.com/onda-lang/onda) audio 
 [Pre-built binaries](https://github.com/onda-lang/OndaCollider/releases) are available for Windows, macOS and Linux.
 The pre-built macOS binaries are not signed.
 
-## Build
-
-Default flow: download the pinned Onda SDK and install the plugin.
-
-Unix:
-
-```bash
-./build.sh /path/to/supercollider /path/to/Extensions
-```
-
-Windows:
-
-```bat
-build.bat "C:\path\to\supercollider" "C:\path\to\Extensions"
-```
-
-If the Onda SDK path is omitted, the build scripts download the release pinned in [`onda-version`](onda-version) for the current platform into `build/onda-sdk`.
-Set `ONDA_VERSION` to select a different release tag without changing the pin. Cached SDKs are reused only when their recorded version matches.
-
-To use a local Onda checkout/build instead of the downloaded SDK, pass the Onda repo path explicitly and the install destination as the third argument.
-
-Unix:
-
-```bash
-./build.sh /path/to/supercollider /path/to/onda /path/to/Extensions
-```
-
-Windows:
-
-```bat
-build.bat "C:\path\to\supercollider" "C:\path\to\onda" "C:\path\to\Extensions"
-```
-When using a local Onda repo, the build uses:
-
-- `include/onda.h`
-- `lib/` if present
-- otherwise `target/release/` for locally built libraries
-
-## Requirements
-
-- SuperCollider source tree (`SC_PATH`).
-- Extracted Onda SDK with:
-  - `include/onda.h`
-  - a static library in `lib/`
-- Or a local Onda checkout/build with:
-  - `include/onda.h`
-  - `target/release/onda.lib` on Windows or `target/release/libonda.a` on Unix
-
-The Apple Silicon build targets macOS 11.0 or later, matching SuperCollider
-3.14.1. The Onda SDK must be built for the same or an earlier deployment target.
-
-Supported SDK asset patterns:
-
-- `onda-<version>-linux-x64.tar.xz`
-- `onda-<version>-macos-arm64.tar.xz`
-- `onda-<version>-windows-x64.zip`
-
 ## Usage
 
 For usage and examples, check the `OndaDef` and `Onda` help files.
@@ -109,6 +52,63 @@ Current constraints:
 - `examples/syncGranulator.scd`
 - `examples/syncGranulatorDual.scd`
 - `examples/project/project.scd`
+
+## Requirements
+
+- SuperCollider source tree (`SC_PATH`).
+- Extracted Onda SDK with:
+  - `include/onda.h`
+  - a static library in `lib/`
+- Or a local Onda checkout/build with:
+  - `include/onda.h`
+  - `target/release/onda.lib` on Windows or `target/release/libonda.a` on Unix
+
+The Apple Silicon build targets macOS 11.0 or later, matching SuperCollider
+3.14.1. The Onda SDK must be built for the same or an earlier deployment target.
+
+Supported SDK asset patterns:
+
+- `onda-<version>-linux-x64.tar.xz`
+- `onda-<version>-macos-arm64.tar.xz`
+- `onda-<version>-windows-x64.zip`
+
+## Build
+
+Default flow: download the pinned Onda SDK and install the plugin.
+
+Unix:
+
+```bash
+./build.sh /path/to/supercollider /path/to/Extensions
+```
+
+Windows:
+
+```bat
+build.bat "C:\path\to\supercollider" "C:\path\to\Extensions"
+```
+
+If the Onda SDK path is omitted, the build scripts download the release pinned in [`onda-version`](onda-version) for the current platform into `build/onda-sdk`.
+Set `ONDA_VERSION` to select a different release tag without changing the pin. Cached SDKs are reused only when their recorded version matches.
+
+To use a local Onda checkout/build instead of the downloaded SDK, pass the Onda repo path explicitly and the install destination as the third argument.
+
+Unix:
+
+```bash
+./build.sh /path/to/supercollider /path/to/onda /path/to/Extensions
+```
+
+Windows:
+
+```bat
+build.bat "C:\path\to\supercollider" "C:\path\to\onda" "C:\path\to\Extensions"
+```
+When using a local Onda repo, the build uses:
+
+- `include/onda.h`
+- `lib/` if present
+- otherwise `target/release/` for locally built libraries
 
 ## Tests
 
