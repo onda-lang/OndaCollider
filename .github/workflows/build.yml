@@ -1,0 +1,235 @@
+name: Build and package OndaCollider
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: OndaCollider source commit
+        type: string
+        required: true
+      onda_run_id:
+        description: Existing Onda SDK run; empty uses the calling Onda run
+        type: string
+        default: ''
+      onda_source_ref:
+        description: Full Onda source commit of the unpublished SDK run
+        type: string
+        default: ''
+    secrets:
+      ONDA_ARTIFACT_TOKEN:
+        description: Token with Actions read access to onda-lang/onda for standalone SDK downloads
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-latest
+            container: ''
+            sdk_target: macos-arm64
+          - name: linux-x86-64
+            os: ubuntu-24.04
+            container: debian:bookworm@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8
+            sdk_target: linux-x64
+          - name: win-x86-64
+            os: windows-2022
+            container: ''
+            sdk_target: windows-x64
+
+    env:
+      SC_REF: Version-3.14.1
+      SC_PATH: ${{ github.workspace }}/supercollider
+      ONDA_SDK_PATH: ${{ github.workspace }}/onda-sdk
+      BUILD_PATH: ${{ github.workspace }}/build
+      INSTALL_PATH: ${{ github.workspace }}/build/Install
+      ARCHIVE_NAME: Onda-${{ matrix.name }}.zip
+
+    steps:
+    - name: Prepare Debian 12 build environment
+      if: runner.os == 'Linux'
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        source /etc/os-release
+        test "$ID:$VERSION_ID" = debian:12
+        test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.36'
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          build-essential ca-certificates cmake curl git pkg-config python3 xz-utils zip \
+          jackd2 libasound2-dev libsndfile1-dev \
+          supercollider-language supercollider-server supercollider-supernova
+
+    - name: Checkout OndaCollider
+      uses: actions/checkout@v6
+      with:
+        repository: onda-lang/OndaCollider
+        ref: ${{ inputs.source_ref }}
+        fetch-depth: 0
+
+    - name: Validate SDK selection
+      env:
+        ONDA_RUN_ID: ${{ inputs.onda_run_id }}
+        ONDA_SOURCE_REF: ${{ inputs.onda_source_ref }}
+        COLLIDER_SOURCE_REF: ${{ inputs.source_ref }}
+        ARTIFACT_TOKEN_CONFIGURED: ${{ secrets.ONDA_ARTIFACT_TOKEN != '' }}
+      run: |
+        [[ "$COLLIDER_SOURCE_REF" =~ ^[0-9a-f]{40}$ ]] || {
+          echo 'OndaCollider source must be a full commit SHA' >&2
+          exit 1
+        }
+        if [[ -n "$ONDA_RUN_ID" || -n "$ONDA_SOURCE_REF" ]]; then
+          [[ "$ONDA_SOURCE_REF" =~ ^[0-9a-f]{40}$ && ( -z "$ONDA_RUN_ID" || "$ONDA_RUN_ID" =~ ^[1-9][0-9]*$ ) ]] || {
+            echo 'Unpublished SDKs require a full Onda source commit and a valid build run ID' >&2
+            exit 1
+          }
+          if [[ "$GITHUB_REPOSITORY" != onda-lang/onda ]]; then
+            if [[ -z "$ONDA_RUN_ID" || "$ARTIFACT_TOKEN_CONFIGURED" != true ]]; then
+              echo 'Standalone SDK downloads require onda_run_id and the ONDA_ARTIFACT_TOKEN secret with Actions read access to onda-lang/onda' >&2
+              exit 1
+            fi
+          fi
+          {
+            echo '## Unpublished OndaCollider build'
+            echo "Onda SDK run: ${ONDA_RUN_ID:-$GITHUB_RUN_ID}"
+            echo "Onda SDK source: $ONDA_SOURCE_REF"
+            echo "OndaCollider source: $COLLIDER_SOURCE_REF"
+            echo 'Publication disabled. Packages are retained as workflow artifacts for 14 days.'
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: Validate release version
+      if: github.repository == 'onda-lang/OndaCollider' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+      shell: bash
+      run: |
+        project_version="$(tr -d '\r\n' < ondacollider-version)"
+        tag_version="${GITHUB_REF_NAME#v}"
+        if [[ "$tag_version" != "$project_version" ]]; then
+          echo "release tag $GITHUB_REF_NAME does not match OndaCollider $project_version" >&2
+          exit 1
+        fi
+
+    - name: Checkout SuperCollider
+      uses: actions/checkout@v6
+      with:
+        repository: supercollider/supercollider
+        path: supercollider
+        ref: ${{ env.SC_REF }}
+        fetch-depth: 0
+        submodules: recursive
+
+    - name: Download unpublished Onda SDK
+      if: inputs.onda_source_ref != ''
+      uses: actions/download-artifact@v7
+      with:
+        name: onda-${{ matrix.sdk_target }}
+        path: ${{ runner.temp }}/onda-sdk-artifact
+        repository: onda-lang/onda
+        run-id: ${{ inputs.onda_run_id || github.run_id }}
+        github-token: ${{ inputs.onda_run_id && (secrets.ONDA_ARTIFACT_TOKEN || github.token) || '' }}
+
+    - name: Verify and stage unpublished Onda SDK
+      if: inputs.onda_source_ref != ''
+      env:
+        ONDA_SOURCE_REF: ${{ inputs.onda_source_ref }}
+        SDK_TARGET: ${{ matrix.sdk_target }}
+      run: |
+        cmake \
+          -DARTIFACT_DIR="$RUNNER_TEMP/onda-sdk-artifact" \
+          -DDESTINATION="$ONDA_SDK_PATH" \
+          -DSOURCE_REVISION="$ONDA_SOURCE_REF" \
+          -DSDK_TARGET="$SDK_TARGET" \
+          -P scripts/stage-onda-sdk.cmake
+
+    - name: Fetch Onda SDK (Unix)
+      if: runner.os != 'Windows' && inputs.onda_source_ref == ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: bash ./scripts/fetch-onda.sh "$ONDA_SDK_PATH"
+
+    - name: Fetch Onda SDK (Windows)
+      if: runner.os == 'Windows' && inputs.onda_source_ref == ''
+      shell: pwsh
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: .\scripts\fetch-onda.ps1 -Destination $env:ONDA_SDK_PATH
+
+    - name: Configure CMake
+      shell: bash
+      run: >
+        cmake -S . -B "$BUILD_PATH"
+        -DCMAKE_BUILD_TYPE=Release
+        -DSC_PATH="$SC_PATH"
+        -DONDA_SDK_PATH="$ONDA_SDK_PATH"
+        -DCMAKE_INSTALL_PREFIX="$INSTALL_PATH"
+
+    - name: Build
+      shell: bash
+      env:
+        CMAKE_BUILD_PARALLEL_LEVEL: 4
+      run: cmake --build "$BUILD_PATH" --config Release
+
+    - name: Test Linux Runtime
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        QTWEBENGINE_DISABLE_SANDBOX: '1'
+      run: |
+        jackd --no-realtime -d dummy -r 48000 -p 1024 > /tmp/onda-jackd.log 2>&1 &
+        jack_pid=$!
+        trap 'kill "$jack_pid" 2>/dev/null || true; wait "$jack_pid" 2>/dev/null || true' EXIT
+        jack_ready=0
+        for ((attempt=0; attempt<50; attempt++)); do
+          if jack_lsp >/dev/null 2>&1; then
+            jack_ready=1
+            break
+          fi
+          sleep 0.1
+        done
+        if [[ "$jack_ready" != 1 ]]; then
+          cat /tmp/onda-jackd.log
+          exit 1
+        fi
+        ctest --test-dir "$BUILD_PATH" --output-on-failure --no-tests=error
+
+    - name: Install
+      shell: bash
+      run: cmake --install "$BUILD_PATH" --config Release
+
+    - name: Zip up build (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      working-directory: ${{ env.INSTALL_PATH }}
+      run: zip -r "$ARCHIVE_NAME" "Onda"
+
+    - name: Zip up build (Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      working-directory: ${{ env.INSTALL_PATH }}
+      run: 7z a "$ARCHIVE_NAME" -tzip "Onda"
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ env.ARCHIVE_NAME }}
+        path: ${{ env.INSTALL_PATH }}/${{ env.ARCHIVE_NAME }}
+        if-no-files-found: error
+        retention-days: 14
+

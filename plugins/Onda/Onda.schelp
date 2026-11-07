@@ -40,6 +40,8 @@ Onda.ar(definition, (cutoff: cutoff));
 
 The spec is client-side metadata for interfaces and normalized mappings. Onda arguments and link::Classes/Synth#-set:: continue to use plain Onda units.
 
+Scalar enum params and event payloads use zero-based numeric ordinals, clamped to the enum's member range. Enum params expose stepped ControlSpecs. Onda input code::ramp:: and code::lag:: attributes run in the DSP program; they do not add smoothing to params.
+
 SUBSECTION:: Hot swap and lifetime
 
 Sending a successfully compiled OndaDef under the same key replaces the server-side program and hot-swaps every running Onda UGen using it. Hot-swap creates and fully initializes a new Onda runtime instance; authored state is not preserved.
@@ -60,6 +62,7 @@ list::
 ## Missing or incompatible mapped buffers are unbound from Onda, and the UGen outputs silence until every required buffer is valid and rebound.
 ## Buffer lock mode follows Onda teletype::may_write:: metadata (shared for read-only, exclusive for writable).
 ## Onda teletype::print(...):: output and top-level delegate occurrences are written to the link::Classes/Server:: log rather than delivered to sclang. Capture and formatting storage are bounded per UGen; overflow or an unusually large formatted line produces a warning.
+## Structured delegate fields are logged by dotted path; arrays and slices are shown as flattened lists.
 ::
 
 CLASSMETHODS::

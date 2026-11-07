@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${1:-${ROOT}/build}"
 SERVER_PROGRAM="${ONDA_COLLIDER_SERVER_PROGRAM:-scsynth}"
+CLASS_LIBRARY="${SCLANG_CLASS_LIBRARY_PATH:-/usr/share/SuperCollider/SCClassLibrary}"
 
 case "${SERVER_PROGRAM}" in
     scsynth)
@@ -38,10 +39,11 @@ yaml_quote() {
 }
 
 {
-    printf 'includePaths:\n  - '
+    # Keep installed extensions out of the test process, including older Onda packages.
+    printf 'excludeDefaultPaths: true\nincludePaths:\n  - '
+    yaml_quote "${CLASS_LIBRARY}"
+    printf '\n  - '
     yaml_quote "${ROOT}/plugins/Onda"
-    printf '\nexcludePaths:\n  - '
-    yaml_quote "${HOME}/.local/share/SuperCollider/Extensions/Onda"
     printf '\n'
 } > "${SCLANG_CONFIG}"
 
@@ -77,6 +79,16 @@ if ! grep -Fq 'typed event: 2.5' "${SCLANG_LOG}"; then
     echo "Onda event print output did not reach the SuperCollider server log." >&2
     exit 1
 fi
+
+for expected in \
+    'Onda: delegate layout(notes.gain: [0.25, 0.5], notes.bins: [1, 2, 3, 4], tail: 9007199254740993, fixed: [1])' \
+    'Onda: delegate layout(notes.gain: [], notes.bins: [], tail: -9007199254740993, fixed: [1])' \
+    'Onda: delegate empty()'; do
+    if ! grep -Fq "${expected}" "${SCLANG_LOG}"; then
+        echo "Onda delegate layout output missing: ${expected}" >&2
+        exit 1
+    fi
+done
 
 if ! grep -Fq 'print occurrence exceeds the 2048-byte host formatting capacity' "${SCLANG_LOG}"; then
     echo "Onda did not safely reject oversized print formatting output." >&2

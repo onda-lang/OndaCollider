@@ -8,10 +8,12 @@ OndaControlSpec : ControlSpec {
 	}
 
 	map { |value|
+		if(minval == maxval) { ^minval };
 		^this.constrain(warp.map(value.clip(0.0, 1.0)))
 	}
 
 	unmap { |value|
+		if(minval == maxval) { ^0.0 };
 		^warp.unmap(this.constrain(value))
 	}
 }

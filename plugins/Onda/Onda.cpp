@@ -151,12 +151,22 @@ bool appendFormatted(
     return true;
 }
 
+// Converts between native primitive storage and Onda's packed little-endian bytes.
+void copyPackedPrimitive(void* destination, const void* source, size_t bytes) {
+    std::memcpy(destination, source, bytes);
+    const uint16_t endian = 1;
+    if (*reinterpret_cast<const uint8_t*>(&endian) == 0) {
+        auto* data = static_cast<uint8_t*>(destination);
+        std::reverse(data, data + bytes);
+    }
+}
+
 template <typename T>
 bool readPackedValue(const uint8_t*& cursor, const uint8_t* end, T& value) {
     if (!cursor || !end || cursor > end || static_cast<size_t>(end - cursor) < sizeof(T)) {
         return false;
     }
-    std::memcpy(&value, cursor, sizeof(T));
+    copyPackedPrimitive(&value, cursor, sizeof(T));
     cursor += sizeof(T);
     return true;
 }
@@ -266,23 +276,17 @@ const char* inputKindToTag(OndaInputKind kind) {
 }
 
 bool readParamSpec(
-    onda_program_t* program,
-    int index,
+    const onda_value_info_t& info,
     std::optional<OndaParamSpec>& result,
     std::string& error) {
-    const int hasRange = onda_param_has_range(program, index);
-    if (hasRange == 0) {
+    if (!info.has_range) {
         return true;
-    }
-    if (hasRange < 0) {
-        error = "Failed to query parameter range metadata.";
-        return false;
     }
 
     OndaParamSpec spec;
-    spec.minimum = onda_param_range_min_f64(program, index);
-    spec.maximum = onda_param_range_max_f64(program, index);
-    spec.scale = onda_param_scale(program, index);
+    spec.minimum = info.range_min;
+    spec.maximum = info.range_max;
+    spec.scale = info.scale;
     if (!std::isfinite(spec.minimum)
         || !std::isfinite(spec.maximum)
         || (spec.scale != ONDA_PARAM_SCALE_LINEAR && spec.scale != ONDA_PARAM_SCALE_LOG)) {
@@ -290,13 +294,8 @@ bool readParamSpec(
         return false;
     }
 
-    const int hasCurve = onda_param_has_curve(program, index);
-    if (hasCurve < 0) {
-        error = "Failed to query parameter curve metadata.";
-        return false;
-    }
-    if (hasCurve > 0) {
-        const double curve = onda_param_curve(program, index);
+    if (info.has_curve) {
+        const double curve = info.curve;
         if (!std::isfinite(curve)) {
             error = "Invalid parameter curve metadata.";
             return false;
@@ -304,13 +303,8 @@ bool readParamSpec(
         spec.curve = curve;
     }
 
-    const int hasStep = onda_param_has_step(program, index);
-    if (hasStep < 0) {
-        error = "Failed to query parameter step metadata.";
-        return false;
-    }
-    if (hasStep > 0) {
-        const double step = onda_param_step_f64(program, index);
+    if (info.has_step) {
+        const double step = info.step;
         if (!std::isfinite(step) || step <= 0.0) {
             error = "Invalid parameter step metadata.";
             return false;
@@ -318,18 +312,8 @@ bool readParamSpec(
         spec.step = step;
     }
 
-    const int unitBytes = onda_param_unit_copy(program, index, nullptr, 0);
-    if (unitBytes < 0) {
-        error = "Failed to query parameter unit metadata.";
-        return false;
-    }
-    if (unitBytes > 0) {
-        std::vector<char> unit(static_cast<size_t>(unitBytes));
-        if (onda_param_unit_copy(program, index, unit.data(), unitBytes) != unitBytes) {
-            error = "Failed to copy parameter unit metadata.";
-            return false;
-        }
-        spec.unit.assign(unit.data());
+    if (info.unit) {
+        spec.unit = info.unit;
     }
 
     result = std::move(spec);
@@ -432,18 +416,32 @@ bool buildProgramMetadata(
 
     compiled.hasDelegates = delegateCount > 0;
     compiled.hasPrints = logSiteCount > 0;
+    compiled.maxDelegateRegions = 0;
+    for (int i = 0; i < delegateCount; ++i) {
+        const auto* info = onda_delegate_info(compiled.program, i);
+        if (!info || !info->payload_plan || info->region_count < 0) {
+            error = "Failed to query delegate metadata at index " + std::to_string(i) + ".";
+            return false;
+        }
+        compiled.maxDelegateRegions = std::max(compiled.maxDelegateRegions, info->region_count);
+    }
 
     std::vector<bool> bufferArraySlots(static_cast<size_t>(bufferCount), false);
     for (int i = 0; i < bufferArrayCount; ++i) {
-        const int first = onda_buffer_array_first(compiled.program, i);
-        const int length = onda_buffer_array_len(compiled.program, i);
+        const auto* info = onda_buffer_array_info(compiled.program, i);
+        if (!info) {
+            error = "Failed to query buffer-array metadata from Onda program.";
+            return false;
+        }
+        const int first = info->first;
+        const int length = info->len;
         if (first < 0 || length < 1 || first > bufferCount - length) {
             error = "Failed to query buffer-array metadata from Onda program.";
             return false;
         }
 
         if (!compiledFromProject) {
-            const char* name = onda_buffer_array_name(compiled.program, i);
+            const char* name = info->name;
             error = "Host constraint: buffer array '";
             error += name ? name : std::to_string(i);
             error += "' requires an .ondaproject default and cannot be supplied from SuperCollider.";
@@ -457,7 +455,6 @@ bool buildProgramMetadata(
 
     compiled.inputs.clear();
     compiled.outputs.clear();
-    compiled.requiredInputChannels = 0;
     compiled.requiredOutputChannels = 0;
 
     const size_t totalInputDescriptors = static_cast<size_t>(inputCount)
@@ -468,11 +465,15 @@ bool buildProgramMetadata(
     compiled.outputs.reserve(static_cast<size_t>(outputCount));
 
     for (int i = 0; i < inputCount; ++i) {
-        const int arrayLen = onda_input_array_len(compiled.program, i);
-        if (arrayLen != 1) {
+        const auto* info = onda_input_info(compiled.program, i);
+        if (!info) {
+            error = "Failed to query input metadata at index " + std::to_string(i) + ".";
+            return false;
+        }
+        if (info->is_array || info->array_len != 1) {
             std::ostringstream msg;
             msg << "Host constraint: input '";
-            if (const char* name = onda_input_name(compiled.program, i)) {
+            if (const char* name = info->name) {
                 msg << name;
             } else {
                 msg << i;
@@ -482,11 +483,11 @@ bool buildProgramMetadata(
             return false;
         }
 
-        const int elemType = onda_input_elem_type(compiled.program, i);
+        const int elemType = info->element_type;
         if (elemType != ONDA_PRIMITIVE_F32) {
             std::ostringstream msg;
             msg << "Host constraint: input '";
-            if (const char* name = onda_input_name(compiled.program, i)) {
+            if (const char* name = info->name) {
                 msg << name;
             } else {
                 msg << i;
@@ -497,7 +498,7 @@ bool buildProgramMetadata(
         }
 
         OndaInputDescriptor desc;
-        desc.name = onda_input_name(compiled.program, i) ? onda_input_name(compiled.program, i) : ("in" + std::to_string(i + 1));
+        desc.name = info->name ? info->name : ("in" + std::to_string(i + 1));
         desc.audioRate = true;
         desc.kind = OndaInputKind::Input;
         desc.ondaIndex = i;
@@ -505,21 +506,24 @@ bool buildProgramMetadata(
         desc.elemBytes = static_cast<int>(sizeof(float));
         desc.arrayLen = 1;
 
-        if (onda_input_has_default(compiled.program, i) > 0) {
+        if (info->has_default) {
             desc.hasInit = true;
-            desc.init = static_cast<float>(onda_input_default_f64(compiled.program, i));
+            desc.init = static_cast<float>(info->default_f64);
         }
 
-        compiled.requiredInputChannels += 1;
         compiled.inputs.push_back(std::move(desc));
     }
 
     for (int i = 0; i < paramCount; ++i) {
-        const int arrayLen = onda_param_array_len(compiled.program, i);
-        if (arrayLen != 1) {
+        const auto* info = onda_param_info(compiled.program, i);
+        if (!info) {
+            error = "Failed to query parameter metadata at index " + std::to_string(i) + ".";
+            return false;
+        }
+        if (info->is_array || info->array_len != 1) {
             std::ostringstream msg;
             msg << "Host constraint: param '";
-            if (const char* name = onda_param_name(compiled.program, i)) {
+            if (const char* name = info->name) {
                 msg << name;
             } else {
                 msg << i;
@@ -529,13 +533,13 @@ bool buildProgramMetadata(
             return false;
         }
 
-        const int elemType = onda_param_elem_type(compiled.program, i);
+        const int elemType = info->element_type;
         const int elemBytes = primitiveByteSize(elemType);
-        const int typeBytes = onda_param_type_bytes(compiled.program, i);
+        const int typeBytes = info->byte_size;
         if (elemBytes < 0 || typeBytes != elemBytes) {
             std::ostringstream msg;
             msg << "Host constraint: param '";
-            if (const char* name = onda_param_name(compiled.program, i)) {
+            if (const char* name = info->name) {
                 msg << name;
             } else {
                 msg << i;
@@ -546,7 +550,7 @@ bool buildProgramMetadata(
         }
 
         OndaInputDescriptor desc;
-        desc.name = onda_param_name(compiled.program, i) ? onda_param_name(compiled.program, i) : ("param" + std::to_string(i + 1));
+        desc.name = info->name ? info->name : ("param" + std::to_string(i + 1));
         desc.audioRate = false;
         desc.kind = OndaInputKind::Param;
         desc.ondaIndex = i;
@@ -554,13 +558,13 @@ bool buildProgramMetadata(
         desc.elemBytes = elemBytes;
         desc.arrayLen = 1;
 
-        if (onda_param_has_default(compiled.program, i) > 0) {
+        if (info->has_default) {
             desc.hasInit = true;
-            desc.init = static_cast<float>(onda_param_default_f64(compiled.program, i));
+            desc.init = static_cast<float>(info->default_f64);
         }
 
-        if (!readParamSpec(compiled.program, i, desc.paramSpec, error)) {
-            const char* name = onda_param_name(compiled.program, i);
+        if (!readParamSpec(*info, desc.paramSpec, error)) {
+            const char* name = info->name;
             const std::string paramName = name ? name : std::to_string(i);
             error += " Parameter: '" + paramName + "'.";
             return false;
@@ -570,38 +574,32 @@ bool buildProgramMetadata(
     }
 
     for (int i = 0; i < eventCount; ++i) {
-        const int eventParamCount = onda_event_param_count(compiled.program, i);
-        if (eventParamCount != 1) {
-            std::ostringstream msg;
-            msg << "Host constraint: event '";
-            if (const char* name = onda_event_name(compiled.program, i)) {
-                msg << name;
-            } else {
-                msg << i;
-            }
-            msg << "' must use a single scalar primitive payload for SuperCollider integration.";
-            error = msg.str();
+        const auto* info = onda_event_info(compiled.program, i);
+        if (!info || !info->payload_plan) {
+            error = "Failed to query event metadata at index " + std::to_string(i) + ".";
             return false;
         }
 
-        onda_event_tensor_info_t tensor{};
-        const int tensorCount = onda_event_tensor_count(compiled.program, i);
-        const bool hasTensorInfo = tensorCount == 1
-            && onda_event_tensor_info(compiled.program, i, 0, &tensor) == 0;
-        const int elemType = hasTensorInfo ? tensor.element_type : -1;
+        const auto* tensor = info->tensor_count == 1
+            ? onda_payload_tensor_info(info->payload_plan, 0)
+            : nullptr;
+        const int elemType = tensor ? tensor->element_type : -1;
         const int elemBytes = primitiveByteSize(elemType);
 
-        // Aggregate leaf paths contain a dot; a top-level primitive path is just its parameter.
+        // Every message parameter has at least one tensor. One scalar tensor with an
+        // unqualified path therefore identifies exactly one scalar parameter; structs
+        // and tuples have qualified paths, while arrays and slices carry shape metadata.
         if (elemBytes < 0
-            || !tensor.path
-            || std::strchr(tensor.path, '.')
-            || tensor.parameter_index != 0
-            || tensor.shape_rank != 0
-            || tensor.is_slice != 0
-            || tensor.fixed_element_count != 1) {
+            || info->region_count != 1
+            || !tensor->path
+            || std::strchr(tensor->path, '.')
+            || tensor->parameter_index != 0
+            || tensor->shape_rank != 0
+            || tensor->is_slice != 0
+            || tensor->fixed_element_count != 1) {
             std::ostringstream msg;
             msg << "Host constraint: event '";
-            if (const char* name = onda_event_name(compiled.program, i)) {
+            if (const char* name = info->name) {
                 msg << name;
             } else {
                 msg << i;
@@ -612,7 +610,7 @@ bool buildProgramMetadata(
         }
 
         OndaInputDescriptor desc;
-        desc.name = onda_event_name(compiled.program, i) ? onda_event_name(compiled.program, i) : ("event" + std::to_string(i + 1));
+        desc.name = info->name ? info->name : ("event" + std::to_string(i + 1));
         desc.audioRate = false;
         desc.kind = OndaInputKind::Event;
         desc.ondaIndex = i;
@@ -633,9 +631,14 @@ bool buildProgramMetadata(
             continue;
         }
 
-        const char* rawName = onda_buffer_name(compiled.program, i);
+        const auto* info = onda_buffer_info(compiled.program, i);
+        if (!info) {
+            error = "Failed to query buffer metadata at index " + std::to_string(i) + ".";
+            return false;
+        }
+        const char* rawName = info->name;
         const std::string name = rawName ? rawName : ("buffer" + std::to_string(i + 1));
-        const int elemType = onda_buffer_elem_type(compiled.program, i);
+        const int elemType = info->element_type;
         if (elemType != ONDA_PRIMITIVE_F32) {
             if (compiledFromProject) {
                 // The project-owned asset is already bound by Onda. Non-f32 buffers cannot be
@@ -651,9 +654,9 @@ bool buildProgramMetadata(
             return false;
         }
 
-        const int channelsKind = onda_buffer_channels_kind(compiled.program, i);
-        const int channelsStatic = onda_buffer_channels_static(compiled.program, i);
-        const int mayWrite = onda_buffer_may_write(compiled.program, i);
+        const int channelsKind = info->channels_kind;
+        const int channelsStatic = info->channels_static;
+        const int mayWrite = info->may_write;
         if (channelsKind != ONDA_BUFFER_CHANNELS_MONO
             && channelsKind != ONDA_BUFFER_CHANNELS_STATIC
             && channelsKind != ONDA_BUFFER_CHANNELS_DYNAMIC) {
@@ -695,17 +698,22 @@ bool buildProgramMetadata(
     }
 
     for (int i = 0; i < outputCount; ++i) {
-        const int arrayLen = onda_output_array_len(compiled.program, i);
+        const auto* info = onda_output_info(compiled.program, i);
+        if (!info) {
+            error = "Failed to query output metadata at index " + std::to_string(i) + ".";
+            return false;
+        }
+        const int arrayLen = info->array_len;
         if (arrayLen < 1) {
             error = "Failed to query output array length at index " + std::to_string(i) + ".";
             return false;
         }
 
-        const int elemType = onda_output_elem_type(compiled.program, i);
+        const int elemType = info->element_type;
         if (elemType != ONDA_PRIMITIVE_F32) {
             std::ostringstream msg;
             msg << "Host constraint: output '";
-            if (const char* name = onda_output_name(compiled.program, i)) {
+            if (const char* name = info->name) {
                 msg << name;
             } else {
                 msg << i;
@@ -715,7 +723,7 @@ bool buildProgramMetadata(
             return false;
         }
 
-        const int typeBytes = onda_output_type_bytes(compiled.program, i);
+        const int typeBytes = info->byte_size;
         if (arrayLen > std::numeric_limits<int>::max() / static_cast<int>(sizeof(float))) {
             error = "Output array byte layout exceeds the host limit at index " + std::to_string(i) + ".";
             return false;
@@ -729,7 +737,7 @@ bool buildProgramMetadata(
         }
 
         OndaInputDescriptor outDesc;
-        outDesc.name = onda_output_name(compiled.program, i) ? onda_output_name(compiled.program, i) : ("out" + std::to_string(i + 1));
+        outDesc.name = info->name ? info->name : ("out" + std::to_string(i + 1));
         outDesc.ondaIndex = i;
         outDesc.elemType = ONDA_PRIMITIVE_F32;
         outDesc.elemBytes = static_cast<int>(sizeof(float));
@@ -759,8 +767,9 @@ bool discoverProjectBufferDefaults(
         if (result == 0) {
             desc.hasProjectDefault = true;
             desc.init = -1.0f;
-        } else if (result != -2) {
-            error = "Failed to query project default for buffer '" + desc.name + "'.";
+        } else if (result != ONDA_API_ERROR_VALIDATION_FAILED) {
+            error = "Failed to query project default for buffer '" + desc.name
+                + "' (status " + std::to_string(result) + ").";
             return false;
         }
     }
@@ -976,8 +985,7 @@ bool ondaCompileStage2Impl(World* world, void* inUserData) {
         std::unique_ptr<onda_instance_t, decltype(&onda_instance_destroy)> instance(
             onda_instance_create(
                 compiled->program,
-                compiled->requiredInputChannels,
-                (compiled->requiredOutputChannels > 0) ? compiled->requiredOutputChannels : 1,
+                nullptr,
                 instanceDiag.get()),
             onda_instance_destroy);
 
@@ -1202,10 +1210,8 @@ bool Onda::bindProgram(CompiledProgram* program, bool isHotSwap) {
     }
 
     const onda_allocator_t allocator{mWorld, ondaRtAlloc, ondaRtFree};
-    onda_instance_t* newInstance = onda_instance_create_with_allocator(
+    onda_instance_t* newInstance = onda_instance_create(
         program->program,
-        program->requiredInputChannels,
-        (program->requiredOutputChannels > 0) ? program->requiredOutputChannels : 1,
         &allocator,
         nullptr);
     if (!newInstance) {
@@ -1278,9 +1284,10 @@ bool Onda::initializeInstance() {
 #endif
     if (result != 0) {
         Print(
-            "ERROR: Onda (definition %d, instance %d): full initialization failed.\n",
+            "ERROR: Onda (definition %d, instance %d): full initialization failed (status %d).\n",
             mDefinitionId,
-            mUnitIndex);
+            mUnitIndex,
+            result);
         return false;
     }
 
@@ -1431,6 +1438,8 @@ bool Onda::allocateRtState(CompiledProgram* program) {
     const size_t eventOffset = reserveArray(newEventDescCount, sizeof(RuntimeControlState), alignof(RuntimeControlState));
     const size_t bufferOffset = reserveArray(newBufferDescCount, sizeof(RuntimeBufferState), alignof(RuntimeBufferState));
     const size_t outputOffset = reserveArray(newBoundOutputCount, sizeof(RuntimeOutputState), alignof(RuntimeOutputState));
+    const size_t delegateRegionsOffset = reserveArray(
+        program->maxDelegateRegions, sizeof(onda_payload_region_t), alignof(onda_payload_region_t));
 #if SUPERNOVA
     const size_t lockOffset = reserveArray(newBufferDescCount, sizeof(BufferLockState), alignof(BufferLockState));
 #endif
@@ -1525,6 +1534,10 @@ bool Onda::allocateRtState(CompiledProgram* program) {
     mRuntimeBuffers = newRuntimeBuffers;
     mBufferDescCount = newBufferDescCount;
     mRuntimeOutputs = newRuntimeOutputs;
+    mDelegateRegions = reinterpret_cast<onda_payload_region_t*>(at(delegateRegionsOffset));
+    for (int i = 0; i < program->maxDelegateRegions; ++i) {
+        new (mDelegateRegions + i) onda_payload_region_t{};
+    }
     mDelegateBatchStorage = at(delegateBatchOffset);
     mPrintBatchStorage = at(printBatchOffset);
     mDelegateFormatStorage = program->hasDelegates ? reinterpret_cast<char*>(at(formatOffset)) : nullptr;
@@ -1547,7 +1560,6 @@ bool Onda::allocateRtState(CompiledProgram* program) {
     mBufferLockCapacity = newBufferDescCount;
     mBufferLockCount = 0;
 #endif
-    mBindingsNeedValidate = false;
 
     return true;
 }
@@ -1563,6 +1575,7 @@ void Onda::freeRtState() {
     mRuntimeEvents = nullptr;
     mRuntimeBuffers = nullptr;
     mRuntimeOutputs = nullptr;
+    mDelegateRegions = nullptr;
     mDelegateBatchStorage = nullptr;
     mPrintBatchStorage = nullptr;
     mDelegateFormatStorage = nullptr;
@@ -1585,7 +1598,6 @@ void Onda::freeRtState() {
     mBufferLockCapacity = 0;
     mBufferLockCount = 0;
 #endif
-    mBindingsNeedValidate = false;
 }
 
 void Onda::releaseInstance() {
@@ -1689,7 +1701,7 @@ onda_execution_output_t* Onda::executionOutput() {
         : nullptr;
 }
 
-void Onda::emitDelegateOccurrence(const onda_delegate_occurrence_t& occurrence) const {
+void Onda::emitDelegateOccurrence(const onda_delegate_occurrence_t& occurrence) {
     if (!mProgram || !mProgram->program) {
         return;
     }
@@ -1705,9 +1717,8 @@ void Onda::emitDelegateOccurrence(const onda_delegate_occurrence_t& occurrence) 
     }
 
     const int delegateIndex = static_cast<int>(occurrence.delegate_index);
-    const char* delegateName = onda_delegate_name(mProgram->program, delegateIndex);
-    const int paramCount = onda_delegate_param_count(mProgram->program, delegateIndex);
-    if (paramCount < 0) {
+    const auto* info = onda_delegate_info(mProgram->program, delegateIndex);
+    if (!info || occurrence.payload_size_bytes > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
         Print(
             "WARNING: Onda (definition %d, instance %d): failed to inspect delegate %u.\n",
             mDefinitionId,
@@ -1724,70 +1735,69 @@ void Onda::emitDelegateOccurrence(const onda_delegate_occurrence_t& occurrence) 
         return;
     }
 
-    const uint8_t* cursor = occurrence.payload;
-    const uint8_t* end = cursor ? cursor + occurrence.payload_size_bytes : cursor;
+    onda_payload_layout_t layout{};
+    const int result = onda_payload_layout_from_bytes(
+        info->payload_plan,
+        occurrence.payload,
+        static_cast<int32_t>(occurrence.payload_size_bytes),
+        mDelegateRegions,
+        mProgram->maxDelegateRegions,
+        &layout);
+    if (result != 0) {
+        Print(
+            "WARNING: Onda (definition %d, instance %d): invalid delegate payload (status %d).\n",
+            mDefinitionId, mUnitIndex, result);
+        return;
+    }
+
     size_t length = 0;
     bool formatValid = appendFormatted(
         mDelegateFormatStorage,
         kDelegateFormatBytes,
         length,
         "Onda: delegate %s(",
-        delegateName ? delegateName : "<unnamed>");
+        info->name ? info->name : "<unnamed>");
 
     bool payloadValid = true;
-    for (int paramIndex = 0; paramIndex < paramCount && payloadValid && formatValid; ++paramIndex) {
-        if (paramIndex > 0) {
+    bool first = true;
+    for (int i = 0; i < layout.region_count && payloadValid && formatValid; ++i) {
+        const auto& region = mDelegateRegions[i];
+        if (region.tensor_index < 0) {
+            // Slice-length prefixes are already validated by Onda's layout query.
+            continue;
+        }
+        const auto* tensor = onda_payload_tensor_info(info->payload_plan, region.tensor_index);
+        if (!tensor) {
+            payloadValid = false;
+            break;
+        }
+        if (!first) {
             formatValid = appendFormatted(mDelegateFormatStorage, kDelegateFormatBytes, length, ", ");
         }
+        first = false;
 
-        const char* paramName = onda_delegate_param_name(mProgram->program, delegateIndex, paramIndex);
         if (formatValid) {
             formatValid = appendFormatted(
                 mDelegateFormatStorage,
                 kDelegateFormatBytes,
                 length,
                 "%s: ",
-                paramName ? paramName : "<unnamed>");
+                tensor->path ? tensor->path : "<unnamed>");
         }
 
-        const int elemType = onda_delegate_param_elem_type(mProgram->program, delegateIndex, paramIndex);
-        const int elemBytes = primitiveByteSize(elemType);
-        const int isSlice = onda_delegate_param_is_slice(mProgram->program, delegateIndex, paramIndex);
-        const int isArray = onda_delegate_param_is_array(mProgram->program, delegateIndex, paramIndex);
-        const int arrayLen = onda_delegate_param_array_len(mProgram->program, delegateIndex, paramIndex);
-        if (elemBytes < 0 || isSlice < 0 || isArray < 0 || arrayLen < 0) {
-            payloadValid = false;
-            break;
-        }
-
-        uint32_t count = 1;
-        if (isSlice > 0) {
-            payloadValid = readPackedValue(cursor, end, count);
-        } else if (isArray > 0) {
-            count = static_cast<uint32_t>(arrayLen);
-        }
-
-        if (!payloadValid
-            || static_cast<size_t>(count) > std::numeric_limits<size_t>::max() / static_cast<size_t>(elemBytes)
-            || !cursor
-            || !end
-            || cursor > end
-            || static_cast<size_t>(end - cursor) < static_cast<size_t>(count) * static_cast<size_t>(elemBytes)) {
-            payloadValid = false;
-            break;
-        }
-
-        const bool collection = isSlice > 0 || isArray > 0;
-        if (collection) {
+        const uint8_t* cursor = occurrence.payload + region.payload_offset;
+        const uint8_t* end = cursor + region.payload_bytes;
+        const bool collection = tensor->is_slice || tensor->shape_rank > 0;
+        if (collection && formatValid) {
             formatValid = appendFormatted(mDelegateFormatStorage, kDelegateFormatBytes, length, "[");
         }
-        for (uint32_t valueIndex = 0; valueIndex < count && formatValid; ++valueIndex) {
+        for (int32_t valueIndex = 0; valueIndex < region.element_count && formatValid; ++valueIndex) {
             if (valueIndex > 0) {
                 formatValid = appendFormatted(mDelegateFormatStorage, kDelegateFormatBytes, length, ", ");
             }
             if (formatValid) {
                 const bool appended = appendPackedPrimitive(
-                    elemType,
+                    tensor->element_type,
                     cursor,
                     end,
                     mDelegateFormatStorage,
@@ -1807,9 +1817,10 @@ void Onda::emitDelegateOccurrence(const onda_delegate_occurrence_t& occurrence) 
         if (collection && formatValid) {
             formatValid = appendFormatted(mDelegateFormatStorage, kDelegateFormatBytes, length, "]");
         }
+        payloadValid = payloadValid && cursor == end;
     }
 
-    if (formatValid && (!payloadValid || cursor != end)) {
+    if (formatValid && !payloadValid) {
         formatValid = appendFormatted(mDelegateFormatStorage, kDelegateFormatBytes, length, "<invalid payload>");
     }
     if (formatValid) {
@@ -2052,12 +2063,14 @@ Onda::BufferPrepResult Onda::prepareBuffers() {
 
         if (useProjectDefault) {
             if (state.bound) {
-                if (onda_reset_buffer_to_project_default(mInstance, desc.ondaIndex) != 0) {
+                const int result = onda_reset_buffer_to_project_default(mInstance, desc.ondaIndex);
+                if (result != 0) {
                     Print(
-                        "ERROR: Onda (definition %d, instance %d): failed to restore project buffer '%s'.\n",
+                        "ERROR: Onda (definition %d, instance %d): failed to restore project buffer '%s' (status %d).\n",
                         mDefinitionId,
                         mUnitIndex,
-                        desc.name.c_str());
+                        desc.name.c_str(),
+                        result);
                     return BufferPrepResult::Fatal;
                 }
                 state.bound = false;
@@ -2066,7 +2079,6 @@ Onda::BufferPrepResult Onda::prepareBuffers() {
                 state.boundFrames = -1;
                 state.boundChannels = -1;
                 state.boundSampleRate = 0.0f;
-                mBindingsNeedValidate = true;
             }
             state.invalidReported = false;
             continue;
@@ -2087,13 +2099,15 @@ Onda::BufferPrepResult Onda::prepareBuffers() {
 
         if (!valid) {
             if (state.bound) {
-                if (onda_bind_buffer(mInstance, desc.ondaIndex, nullptr, 0, 0, 0.0f, ONDA_PRIMITIVE_F32) != 0) {
+                const int result = onda_bind_buffer(mInstance, desc.ondaIndex, nullptr, 0, 0, 0.0f, ONDA_PRIMITIVE_F32);
+                if (result != 0) {
                     Print(
-                        "ERROR: Onda (definition %d, instance %d): failed to unbind buffer '%s' (bufnum=%d).\n",
+                        "ERROR: Onda (definition %d, instance %d): failed to unbind buffer '%s' (bufnum=%d, status %d).\n",
                         mDefinitionId,
                         mUnitIndex,
                         desc.name.c_str(),
-                        bufIndex);
+                        bufIndex,
+                        result);
                     return BufferPrepResult::Fatal;
                 }
                 state.bound = false;
@@ -2102,7 +2116,6 @@ Onda::BufferPrepResult Onda::prepareBuffers() {
                 state.boundFrames = -1;
                 state.boundChannels = -1;
                 state.boundSampleRate = 0.0f;
-                mBindingsNeedValidate = true;
             }
             continue;
         }
@@ -2119,13 +2132,15 @@ Onda::BufferPrepResult Onda::prepareBuffers() {
             || state.boundSampleRate != sampleRate;
 
         if (needsRebind) {
-            if (onda_bind_buffer(mInstance, desc.ondaIndex, ptr, frames, channels, sampleRate, ONDA_PRIMITIVE_F32) != 0) {
+            const int result = onda_bind_buffer(mInstance, desc.ondaIndex, ptr, frames, channels, sampleRate, ONDA_PRIMITIVE_F32);
+            if (result != 0) {
                 Print(
-                    "ERROR: Onda (definition %d, instance %d): failed to bind buffer '%s' (bufnum=%d).\n",
+                    "ERROR: Onda (definition %d, instance %d): failed to bind buffer '%s' (bufnum=%d, status %d).\n",
                     mDefinitionId,
                     mUnitIndex,
                     desc.name.c_str(),
-                    bufIndex);
+                    bufIndex,
+                    result);
                 return BufferPrepResult::Fatal;
             }
             state.bound = true;
@@ -2134,7 +2149,6 @@ Onda::BufferPrepResult Onda::prepareBuffers() {
             state.boundFrames = frames;
             state.boundChannels = channels;
             state.boundSampleRate = sampleRate;
-            mBindingsNeedValidate = true;
         }
     }
 
@@ -2163,14 +2177,15 @@ bool Onda::prepareInputs() {
         const int bytes = static_cast<int>(sizeof(float) * static_cast<size_t>(bufferSize()));
         const bool needsRebind = !state.bound || state.boundPtr != bindPtr || state.boundBytes != bytes;
         if (needsRebind) {
-            if (onda_bind_input(mInstance, desc.ondaIndex, bindPtr, bytes) != 0) {
-                Print("ERROR: Onda (definition %d, instance %d): failed to bind input '%s'.\n", mDefinitionId, mUnitIndex, desc.name.c_str());
+            const int result = onda_bind_input(mInstance, desc.ondaIndex, bindPtr, bytes);
+            if (result != 0) {
+                Print("ERROR: Onda (definition %d, instance %d): failed to bind input '%s' (status %d).\n",
+                    mDefinitionId, mUnitIndex, desc.name.c_str(), result);
                 return false;
             }
             state.bound = true;
             state.boundPtr = bindPtr;
             state.boundBytes = bytes;
-            mBindingsNeedValidate = true;
         }
     }
 
@@ -2198,8 +2213,25 @@ bool Onda::prepareParams() {
                 return false;
             }
 
-            if (onda_set_param_by_index(mInstance, desc.ondaIndex, data, desc.elemBytes) != 0) {
-                Print("ERROR: Onda (definition %d, instance %d): failed to set param '%s'.\n", mDefinitionId, mUnitIndex, desc.name.c_str());
+            int result;
+            if (desc.paramSpec) {
+                double plain = value;
+                if (desc.elemType == ONDA_PRIMITIVE_I32) {
+                    plain = converted.i32;
+                } else if (desc.elemType == ONDA_PRIMITIVE_I64) {
+                    plain = static_cast<double>(converted.i64);
+                } else if (desc.elemType == ONDA_PRIMITIVE_BOOL) {
+                    plain = converted.boolean;
+                }
+                // Ranged domains fit the f64 host API. Normalize here, including enum
+                // ordinals and step grids, rather than relying on generated reads.
+                result = onda_set_param_plain_f64(mInstance, desc.ondaIndex, plain);
+            } else {
+                result = onda_set_param_by_index(mInstance, desc.ondaIndex, data, desc.elemBytes);
+            }
+            if (result != 0) {
+                Print("ERROR: Onda (definition %d, instance %d): failed to set param '%s' (status %d).\n",
+                    mDefinitionId, mUnitIndex, desc.name.c_str(), result);
                 return false;
             }
             state.previousValue = value;
@@ -2232,15 +2264,20 @@ bool Onda::triggerEvents() {
                 return false;
             }
 
-            const onda_event_tensor_view_t view{data, 1};
-            const int result = onda_trigger_event_views_by_index_unchecked(
+            // Packed event input normalizes integer/enum domains. Borrowed tensor
+            // views instead require already-canonical values and reject out-of-range ordinals.
+            uint8_t payload[sizeof(ControlPrimitiveValue)]{};
+            copyPackedPrimitive(payload, data, static_cast<size_t>(desc.elemBytes));
+            const int result = onda_trigger_event_by_index_checked(
                 mInstance,
                 desc.ondaIndex,
-                &view,
+                payload,
+                desc.elemBytes,
                 executionOutput());
             flushExecutionOutput();
             if (result != 0) {
-                Print("ERROR: Onda (definition %d, instance %d): failed to trigger event '%s'.\n", mDefinitionId, mUnitIndex, desc.name.c_str());
+                Print("ERROR: Onda (definition %d, instance %d): failed to trigger event '%s' (status %d).\n",
+                    mDefinitionId, mUnitIndex, desc.name.c_str(), result);
                 return false;
             }
         }
@@ -2266,14 +2303,15 @@ bool Onda::prepareOutputs() {
 
         const bool needsRebind = !outState.bound || outState.boundPtr != ptr || outState.boundBytes != bytes;
         if (needsRebind) {
-            if (onda_bind_output(mInstance, outDesc.ondaIndex, ptr, bytes) != 0) {
-                Print("ERROR: Onda (definition %d, instance %d): failed to bind output '%s'.\n", mDefinitionId, mUnitIndex, outDesc.name.c_str());
+            const int result = onda_bind_output(mInstance, outDesc.ondaIndex, ptr, bytes);
+            if (result != 0) {
+                Print("ERROR: Onda (definition %d, instance %d): failed to bind output '%s' (status %d).\n",
+                    mDefinitionId, mUnitIndex, outDesc.name.c_str(), result);
                 return false;
             }
             outState.bound = true;
             outState.boundPtr = ptr;
             outState.boundBytes = bytes;
-            mBindingsNeedValidate = true;
         }
     }
 
@@ -2352,18 +2390,17 @@ bool Onda::processAudio(int nSamples) {
         return false;
     }
 
-    if (mBindingsNeedValidate) {
-        if (onda_prepare_unchecked_process(mInstance) != 0) {
-            Print(
-                "ERROR: Onda (definition %d, instance %d): failed to prepare bindings for unchecked processing.\n",
-                mDefinitionId,
-                mUnitIndex);
+    // In 0.9 bindings update descriptor tables immediately. Readiness is a constant-time
+    // check of initialization and missing audio bindings; no host-side dirty flag is needed.
+    const int prepareResult = onda_prepare_process(mInstance);
+    if (prepareResult != 0) {
+        Print(
+            "ERROR: Onda (definition %d, instance %d): process preparation failed (status %d).\n",
+            mDefinitionId, mUnitIndex, prepareResult);
 #if SUPERNOVA
-            releaseBufferLocks();
+        releaseBufferLocks();
 #endif
-            return false;
-        }
-        mBindingsNeedValidate = false;
+        return false;
     }
 
     if (!triggerEvents()) {
@@ -2381,7 +2418,8 @@ bool Onda::processAudio(int nSamples) {
 #endif
 
     if (processResult != 0) {
-        Print("ERROR: Onda (definition %d, instance %d): onda_process_unchecked failed.\n", mDefinitionId, mUnitIndex);
+        Print("ERROR: Onda (definition %d, instance %d): onda_process_unchecked failed (status %d).\n",
+            mDefinitionId, mUnitIndex, processResult);
         return false;
     }
 
