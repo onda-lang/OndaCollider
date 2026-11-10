@@ -1,0 +1,29 @@
+enum Mode:
+  First
+  Second
+
+enum Single:
+  Only
+
+proc Main:
+  ins:
+    signal = 0.0 {ramp = 0.001}
+
+  params:
+    gain = 2.0
+    mode = Mode::Second
+    single = Single::Only
+
+  outs:
+    result: f32[2]
+
+  init:
+    initial_gain = gain * 10.0
+    selected = 0.0
+
+  event select(value: Mode):
+    selected = f32(i32(value))
+
+  sample:
+    result[0] = initial_gain + signal * gain + f32(i32(mode)) + f32(i32(single))
+    result[1] = selected

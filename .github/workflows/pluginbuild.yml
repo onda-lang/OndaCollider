@@ -1,7 +1,7 @@
 name: Build OndaCollider
 
 env:
-  MACOSX_DEPLOYMENT_TARGET: "11.0"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 on:
   push:
@@ -9,157 +9,57 @@ on:
       - 'v*'
       - '[0-9]*.[0-9]*.[0-9]*'
   workflow_dispatch:
+    inputs:
+      onda_run_id:
+        description: Onda build run providing unpublished SDKs; empty uses the pinned release
+        type: string
+        default: ''
+      onda_source_ref:
+        description: Full Onda source commit of the unpublished SDK run
+        type: string
+        default: ''
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
 
 jobs:
   build:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macos-arm64
-            os: macos-latest
-          - name: linux-x86-64
-            os: ubuntu-22.04
-          - name: win-x86-64
-            os: windows-latest
+    uses: ./.github/workflows/build.yml
+    with:
+      source_ref: ${{ github.sha }}
+      onda_run_id: ${{ inputs.onda_run_id || '' }}
+      onda_source_ref: ${{ inputs.onda_source_ref || '' }}
+    secrets: inherit
 
-    env:
-      SC_REF: Version-3.14.1
-      SC_PATH: ${{ github.workspace }}/supercollider
-      ONDA_SDK_PATH: ${{ github.workspace }}/onda-sdk
-      BUILD_PATH: ${{ github.workspace }}/build
-      INSTALL_PATH: ${{ github.workspace }}/build/Install
-      ARCHIVE_NAME: Onda-${{ matrix.name }}.zip
-
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-    - name: Checkout OndaCollider
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 0
+      - name: Download tested packages
+        uses: actions/download-artifact@v7
+        with:
+          pattern: Onda-*.zip
+          path: dist
+          merge-multiple: true
 
-    - name: Validate release version
-      if: startsWith(github.ref, 'refs/tags/')
-      shell: bash
-      run: |
-        project_version="$(tr -d '\r\n' < ondacollider-version)"
-        tag_version="${GITHUB_REF_NAME#v}"
-        if [[ "$tag_version" != "$project_version" ]]; then
-          echo "release tag $GITHUB_REF_NAME does not match OndaCollider $project_version" >&2
-          exit 1
-        fi
-
-    - name: Checkout SuperCollider
-      uses: actions/checkout@v6
-      with:
-        repository: supercollider/supercollider
-        path: supercollider
-        ref: ${{ env.SC_REF }}
-        fetch-depth: 0
-        submodules: recursive
-
-    - name: Install Linux Deps
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          jackd2 libasound2-dev libsndfile1-dev libgtk-3-dev libwebkit2gtk-4.0-dev \
-          supercollider-language supercollider-server
-
-    - name: Fetch Onda SDK (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-      run: bash ./scripts/fetch-onda.sh "$ONDA_SDK_PATH"
-
-    - name: Fetch Onda SDK (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-      run: .\scripts\fetch-onda.ps1 -Destination $env:ONDA_SDK_PATH
-
-    - name: Configure CMake
-      shell: bash
-      run: >
-        cmake -S . -B "$BUILD_PATH"
-        -DCMAKE_BUILD_TYPE=Release
-        -DSC_PATH="$SC_PATH"
-        -DONDA_SDK_PATH="$ONDA_SDK_PATH"
-        -DCMAKE_INSTALL_PREFIX="$INSTALL_PATH"
-
-    - name: Build
-      shell: bash
-      env:
-        CMAKE_BUILD_PARALLEL_LEVEL: 4
-      run: cmake --build "$BUILD_PATH" --config Release
-
-    - name: Test Linux Runtime
-      if: runner.os == 'Linux'
-      shell: bash
-      run: |
-        jackd -d dummy -r 48000 -p 1024 > /tmp/onda-jackd.log 2>&1 &
-        jack_ready=0
-        for attempt in {1..50}; do
-          if jack_lsp >/dev/null 2>&1; then
-            jack_ready=1
-            break
-          fi
-          sleep 0.1
-        done
-        if [[ "$jack_ready" != 1 ]]; then
-          cat /tmp/onda-jackd.log
-          exit 1
-        fi
-        ctest --test-dir "$BUILD_PATH" --output-on-failure
-
-    - name: Install
-      shell: bash
-      run: cmake --install "$BUILD_PATH" --config Release
-
-    - name: Zip up build (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      working-directory: ${{ env.INSTALL_PATH }}
-      run: zip -r "$ARCHIVE_NAME" "Onda"
-
-    - name: Zip up build (Windows)
-      if: runner.os == 'Windows'
-      shell: bash
-      working-directory: ${{ env.INSTALL_PATH }}
-      run: 7z a "$ARCHIVE_NAME" -tzip "Onda"
-
-    - name: Upload build artifact
-      uses: actions/upload-artifact@v6
-      with:
-        name: ${{ env.ARCHIVE_NAME }}
-        path: ${{ env.INSTALL_PATH }}/${{ env.ARCHIVE_NAME }}
-
-    - name: Upload binaries to release
-      if: startsWith(github.ref, 'refs/tags/')
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
-        RELEASE_TAG: ${{ github.ref_name }}
-        RELEASE_FILE: ${{ env.INSTALL_PATH }}/${{ env.ARCHIVE_NAME }}
-      run: |
-        if [[ ! -f "$RELEASE_FILE" ]]; then
-          echo "release artifact not found: $RELEASE_FILE" >&2
-          exit 1
-        fi
-
-        if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-          if [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" == "true" ]]; then
-            gh release upload "$RELEASE_TAG" "$RELEASE_FILE" --clobber
-            gh release edit "$RELEASE_TAG" --draft=false
+      - name: Publish release packages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          files=(dist/Onda-*.zip)
+          test "${#files[@]}" -eq 3
+          for file in "${files[@]}"; do test -s "$file"; done
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+            if [[ "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')" == true ]]; then
+              gh release edit "$RELEASE_TAG" --draft=false --repo "$GITHUB_REPOSITORY"
+            fi
           else
-            gh release upload "$RELEASE_TAG" "$RELEASE_FILE" --clobber
+            gh release create "$RELEASE_TAG" "${files[@]}" --notes '' --repo "$GITHUB_REPOSITORY"
           fi
-        else
-          gh release create "$RELEASE_TAG" "$RELEASE_FILE" --notes ""
-        fi

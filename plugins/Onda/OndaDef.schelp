@@ -35,12 +35,15 @@ Onda.ar(definition, (cutoff: cutoff));
 
 The control and Onda UGen still exchange plain values; link::Classes/ControlSpec#-map:: and GUI widgets perform normalized mapping when requested.
 
+Onda code::proc Main:: public endpoints use the same mapping. Scalar enum params expose numeric ordinal defaults and stepped ControlSpecs; member names and labels are not exported to sclang.
+
 SUBSECTION:: Current limitations
 
 list::
 ## Onda teletype::ins::, teletype::params::, and teletype::events:: must be scalar.
 ## teletype::ins:: must use teletype::f32::; teletype::params:: may use any scalar primitive type.
 ## teletype::events:: must use a single scalar primitive payload and fire whenever their control value changes.
+## Scalar enums are also supported for params and event payloads as zero-based numeric ordinals, clamped to the enum's member range.
 ## teletype::outs:: must use teletype::f32:: endpoint types (teletype::f32:: or teletype::f32[N]::).
 ## SC link::Classes/Buffer:: overrides must be teletype::buffer<f32...>:: and are driven from control-rate code::bufnum:: inputs. Project-owned buffers may use any Onda primitive element type.
 ## Project-owned buffers with non-teletype::f32:: elements are omitted from teletype::ins:: and cannot be overridden from SuperCollider.

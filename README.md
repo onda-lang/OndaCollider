@@ -5,7 +5,13 @@
 SuperCollider plugin to run the [Onda](https://github.com/onda-lang/onda) audio programming language in `scsynth`/`supernova`.
 
 [Pre-built binaries](https://github.com/onda-lang/OndaCollider/releases) are available for Windows, macOS and Linux.
-The pre-built macOS binaries are not signed.
+
+Release signing status:
+
+- **macOS:** binaries are not signed with an Apple Developer ID and are not notarized. macOS may
+  block downloaded plug-ins until you approve them in **System Settings → Privacy & Security**.
+  See [Apple's instructions](https://support.apple.com/102445).
+- **Windows:** plug-in binaries are not code-signed (Authenticode).
 
 ## Usage
 
@@ -25,6 +31,10 @@ Buffer arrays have no corresponding SuperCollider endpoint. They are accepted on
 `.ondaproject`, are omitted from `OndaDef.ins`, and always retain their project-provided assets (or
 Onda's neutral default for an unbound array slot).
 
+Programs may also use `proc Main`; its public endpoints use the same mappings.
+Onda input `ramp`/`lag` attributes run in the DSP program. OndaCollider preserves
+the server thread's floating-point mode and does not enable denormal flushing itself.
+
 Current constraints:
 
 - `ins` must use `f32`; `params` may use any scalar Onda primitive type. SC controls are converted
@@ -34,6 +44,9 @@ Current constraints:
   An event fires whenever its control value changes, and the new value is converted to the declared
   payload type. Integer conversion uses truncation and saturation, while `bool` uses a `0.5`
   threshold. Event controls default to zero.
+- Scalar enum params and event payloads use zero-based numeric ordinals, clamped to the enum's
+  member range. Enum params expose stepped ControlSpecs; member names and labels are not exported
+  to sclang.
 - `outs` must use `f32` endpoint types (`f32` or `f32[N]`, flattened to SC channels).
 - SC `Buffer` overrides support `buffer<f32...>` endpoints. Project-owned buffers may use any Onda
   primitive element type.
@@ -42,6 +55,8 @@ Current constraints:
 - Onda `print(...)` output and top-level delegate occurrences are written to the SuperCollider
   server log. Output capture is bounded per UGen; excess occurrences or unusually large formatted
   lines are dropped with a server warning rather than allocating while processing.
+  Structured delegate fields are logged by their dotted paths; arrays and slices are shown as
+  flattened lists.
 
 ## Examples
 
@@ -55,7 +70,7 @@ Current constraints:
 
 ## Requirements
 
-- SuperCollider source tree (`SC_PATH`).
+- SuperCollider 3.14.1 source tree (`SC_PATH`).
 - Extracted Onda SDK with:
   - `include/onda.h`
   - a static library in `lib/`
@@ -65,6 +80,10 @@ Current constraints:
 
 The Apple Silicon build targets macOS 11.0 or later, matching SuperCollider
 3.14.1. The Onda SDK must be built for the same or an earlier deployment target.
+The Linux release workflow builds inside a pinned Debian 12 container on an Ubuntu
+runner, targeting glibc 2.36 and libstdc++ from GCC 12 (GLIBCXX 3.4.30). Windows x64
+uses `windows-2022` with the static MSVC runtime (`/MT`). macOS uses `macos-latest`
+with an explicit 11.0 deployment target.
 
 Supported SDK asset patterns:
 
@@ -109,16 +128,3 @@ When using a local Onda repo, the build uses:
 - `include/onda.h`
 - `lib/` if present
 - otherwise `target/release/` for locally built libraries
-
-## Tests
-
-On Linux, after building, run the headless integration suite with:
-
-```bash
-ctest --test-dir build --output-on-failure
-```
-
-The suite runs against both scsynth and supernova when available; the supernova case requires a
-running JACK-compatible server. It exercises source and project compilation, per-UGen instance
-ownership, bounded logging memory, buffer defaults and overrides, buffer-array constraints, event
-edges, definition ordering, and invalid-buffer silence.

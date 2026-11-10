@@ -1,0 +1,15 @@
+struct Note:
+  gain: f64
+  bins: i32[2]
+
+delegate layout(notes: Note[], tail: i64, fixed: f32[1])
+delegate empty()
+
+event report(value: f32):
+  notes = [Note(gain = 0.25, bins = [1, 2]), Note(gain = 0.5, bins = [3, 4])]
+  layout(notes[:], 9007199254740993, [value])
+  layout(notes[0:0], -9007199254740993, [value])
+  empty()
+
+sample:
+  out1 = 0.125

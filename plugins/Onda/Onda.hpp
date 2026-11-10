@@ -48,8 +48,8 @@ struct CompiledProgram {
     std::vector<OndaInputDescriptor> inputs;
     std::vector<OndaInputDescriptor> outputs;
     Onda* firstUnit = nullptr;
-    int requiredInputChannels = 0;
     int requiredOutputChannels = 0;
+    int maxDelegateRegions = 0;
     bool hasDelegates = false;
     bool hasPrints = false;
 };
@@ -151,7 +151,7 @@ private:
     bool triggerEvents();
     bool prepareOutputs();
     void flushExecutionOutput();
-    void emitDelegateOccurrence(const onda_delegate_occurrence_t& occurrence) const;
+    void emitDelegateOccurrence(const onda_delegate_occurrence_t& occurrence);
     void emitPrintOccurrence(const onda_print_occurrence_t& occurrence) const;
     onda_execution_output_t* executionOutput();
     void copyOutputsToSC(int nSamples);
@@ -184,6 +184,7 @@ private:
     RuntimeBufferState* mRuntimeBuffers = nullptr;
     int mBufferDescCount = 0;
     RuntimeOutputState* mRuntimeOutputs = nullptr;
+    onda_payload_region_t* mDelegateRegions = nullptr;
     uint8_t* mDelegateBatchStorage = nullptr;
     uint8_t* mPrintBatchStorage = nullptr;
     char* mDelegateFormatStorage = nullptr;
@@ -191,7 +192,6 @@ private:
     onda_delegate_batch_t mDelegateBatch{};
     onda_print_batch_t mPrintBatch{};
     onda_execution_output_t mExecutionOutput{};
-    bool mBindingsNeedValidate = false;
     bool mNeedsOutputCopy = false;
 #if SUPERNOVA
     BufferLockState* mBufferLocks = nullptr;

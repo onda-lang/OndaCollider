@@ -48,6 +48,8 @@ server.waitForBoot {
         var arrayDef, badArrayDef, badStructuredDef, invalidDef;
         var requiredDef, requiredBus, requiredSynth;
         var fastMathDef, fastMathBus, fastMathSynth;
+        var mainDef, mainBus, mainSynth, layoutDef, layoutBus, layoutSynth;
+        var rejectedEvent;
 
         assert = { |condition, message|
             if(condition.not) { Error("OndaCollider integration test failed: " ++ message).throw };
@@ -134,6 +136,45 @@ server.waitForBoot {
             dualSynth.free;
             replacementDualSynth.free;
 
+            mainDef = compile.(\mainEntry, fixtures +/+ "main.onda");
+            assert.(mainDef.outs == 2, "Main output arrays should flatten to SC channels");
+            assert.(mainDef.ins.collect({ |input| input[\name] }) == [\signal, \gain, \mode, \single, \select],
+                "Main should retain public endpoint names and ordering");
+            assertClose.(mainDef.ins[2][\meta][\init], 1.0, "enum defaults should use numeric ordinals");
+            assertClose.(mainDef.specs[\mode].step, 1.0, "enum ControlSpecs should use unit steps");
+            assertClose.(mainDef.specs[\single].map(0.5), 0.0, "single-member enum mapping should remain constant");
+            assertClose.(mainDef.specs[\single].unmap(0.0), 0.0, "single-member enum normalization should remain finite");
+            mainBus = Bus.control(server, 1);
+            SynthDef(\ondaMainTest, { |resultBus = 0, mode = 99, selected = 99|
+                var output = Onda.ar(\mainEntry, (signal: 0.5, gain: 3, mode: mode, select: selected));
+                Out.kr(resultBus, A2K.kr(output[0] + (output[1] * 10)));
+            }).add;
+            server.sync;
+            mainSynth = Synth(\ondaMainTest, [\resultBus, mainBus.index]);
+            0.1.wait;
+            assertClose.(readBus.(mainBus), 42.5,
+                "Main init should observe SC controls, smoothed inputs should settle, and enum writes should clamp");
+            mainSynth.set(\selected, -99);
+            0.1.wait;
+            assertClose.(readBus.(mainBus), 32.5, "negative enum event ordinals should clamp to zero");
+            mainSynth.set(\mode, -99);
+            0.1.wait;
+            assertClose.(readBus.(mainBus), 31.5, "negative enum parameter ordinals should clamp to zero");
+            mainSynth.free;
+            mainBus.free;
+
+            layoutDef = compile.(\delegateLayout, fixtures +/+ "delegate_layout.onda");
+            layoutBus = Bus.control(server, 1);
+            SynthDef(\ondaDelegateLayoutTest, { |resultBus = 0|
+                Out.kr(resultBus, A2K.kr(Onda.ar(\delegateLayout, (report: 1))));
+            }).add;
+            server.sync;
+            layoutSynth = Synth(\ondaDelegateLayoutTest, [\resultBus, layoutBus.index]);
+            0.1.wait;
+            assertClose.(readBus.(layoutBus), 0.125, "structured delegate logging should preserve audio processing");
+            layoutSynth.free;
+            layoutBus.free;
+
             eventDef = compile.(\eventEdge, fixtures +/+ "event_edge.onda");
             assert.(eventDef.ins.size == 1, "event program should expose one control");
             assert.(eventDef.ins[0][\meta][\kind] == \event, "event metadata kind should be preserved");
@@ -146,7 +187,7 @@ server.waitForBoot {
             server.sync;
             eventSynth = Synth(\ondaEventEdgeTest, [\resultBus, eventBus.index, \eventValue, 2.0]);
             0.1.wait;
-            assertClose.(readBus.(eventBus), 2.0, "an initial nonzero event should trigger after unchecked dispatch preparation");
+            assertClose.(readBus.(eventBus), 2.0, "an initial nonzero event should trigger on the first block");
             0.1.wait;
             assertClose.(readBus.(eventBus), 2.0, "an unchanged event control must not retrigger each block");
             eventSynth.set(\eventValue, 3.0);
@@ -330,6 +371,13 @@ server.waitForBoot {
             0.5.wait;
             assert.(OndaDef.all[\structuredEvent].isNil, "structured events must be rejected even when their flattened payload is scalar");
 
+            ["value: f32[1]", "value: f32[]", "value: (f32, f32)", "first: f32, second: f32", ""].do { |arguments, index|
+                var key = ("unsupportedEvent" ++ index).asSymbol;
+                rejectedEvent = OndaDef(key, "event fire(" ++ arguments ++ "):\n  print(1)\nsample:\n  out1 = 0.0\n");
+                rejectedEvent.send(server);
+                assert.(OndaDef.all[key].isNil, "only a single scalar event payload should be accepted");
+            };
+
             requiredDef = compile.(\requiredBuffer, fixtures +/+ "required_buffer.onda");
             requiredBus = Bus.control(server, 1);
             SynthDef(\ondaRequiredBufferTest, { |resultBus = 0, bufferNumber = 0|
@@ -345,6 +393,9 @@ server.waitForBoot {
             requiredSynth.set(\bufferNumber, 999999);
             0.1.wait;
             assertClose.(readBus.(requiredBus), 0.0, "an invalid required buffer should silence the current block");
+            requiredSynth.set(\bufferNumber, overrideBuffer.bufnum);
+            0.1.wait;
+            assertClose.(readBus.(requiredBus), 0.75, "rebinding a valid SC buffer should restore processing");
 
             eventSynth.free;
             typedSynth.free;
