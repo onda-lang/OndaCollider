@@ -5,10 +5,13 @@
 SuperCollider plugin to run the [Onda](https://github.com/onda-lang/onda) audio programming language in `scsynth`/`supernova`.
 
 [Pre-built binaries](https://github.com/onda-lang/OndaCollider/releases) are available for Windows, macOS and Linux.
-The pre-built macOS binaries are not signed.
 
-The bindings target the Onda 0.9.0 C API. Until that SDK is released, use a local
-0.9.0 checkout/build or an unpublished SDK in CI as described below.
+Release signing status:
+
+- **macOS:** binaries are not signed with an Apple Developer ID and are not notarized. macOS may
+  block downloaded plug-ins until you approve them in **System Settings → Privacy & Security**.
+  See [Apple's instructions](https://support.apple.com/102445).
+- **Windows:** plug-in binaries are not code-signed (Authenticode).
 
 ## Usage
 
@@ -125,40 +128,3 @@ When using a local Onda repo, the build uses:
 - `include/onda.h`
 - `lib/` if present
 - otherwise `target/release/` for locally built libraries
-
-## CI candidate builds
-
-Manually run **Build OndaCollider** on the candidate branch to build all three
-platform packages without publishing a release. To use unpublished Onda SDKs,
-provide both `onda_run_id` (an `onda-lang/onda` build run) and `onda_source_ref`
-(that run's full 40-character Onda source commit). The workflow downloads each
-platform's SDK, verifies its recorded source and archive SHA-256, and requires
-the version pinned in `onda-version`.
-
-Standalone unpublished builds require the `ONDA_ARTIFACT_TOKEN` repository secret,
-with Actions read access to `onda-lang/onda`. Onda's CI can instead call the reusable
-`.github/workflows/build.yml` with `source_ref` (the full OndaCollider commit) and
-`onda_source_ref`, using its own SDK artifacts without an additional secret.
-When called from Onda, omit `onda_run_id` to use that run's SDKs or supply it to
-reuse an earlier Onda build.
-
-Leave both inputs empty to use the pinned published SDK. Manual runs never
-publish, including when run against a tag; release publication requires a tag
-push. Downloadable package artifacts are retained for 14 days.
-
-## Tests
-
-On Linux, after building, run the headless integration suite with:
-
-```bash
-ctest --test-dir build --output-on-failure
-```
-
-The suite runs against both scsynth and supernova when available; the supernova case requires a
-running JACK-compatible server. It exercises source and project compilation, per-UGen instance
-ownership, bounded logging memory, buffer defaults and overrides, buffer-array constraints, event
-edges, definition ordering, invalid-buffer silence and recovery, `proc Main`, smoothed inputs,
-enum controls, and structured delegate payloads. Tests load only the core SC class library and the
-classes under test; set `SCLANG_CLASS_LIBRARY_PATH` if the core library is installed elsewhere.
-Linux CI installs both servers explicitly and runs them with a dummy JACK backend.
-Its root-run `sclang` process uses `QTWEBENGINE_DISABLE_SANDBOX=1` for headless tests.
