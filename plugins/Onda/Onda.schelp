@@ -107,8 +107,8 @@ proc DualOsc:
     lastB = 0.0
 
   sample 8:
-    currentA = oscA(freq = freq, phase_offset = lastB * modDepth)
-    currentB = oscB(freq = freq + detune, phase_offset = lastA * modDepth)
+    currentA = oscA(freq = freq, phase_offset_rad = lastB * modDepth)
+    currentB = oscB(freq = freq + detune, phase_offset_rad = lastA * modDepth)
     lastA = currentA
     lastB = currentB
     out1 = currentA

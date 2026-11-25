@@ -1,8 +1,11 @@
 params:
-  value = 16777216.0
+  value = 9.0
 
 outs:
   out1
 
 sample:
-  out1 = (value + 1.0) - value
+  if value / 10.0 > 0.9:
+    out1 = 1.0
+  else:
+    out1 = 0.0

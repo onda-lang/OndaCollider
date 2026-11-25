@@ -61,7 +61,7 @@ A link::Classes/Symbol:: used to register and later retrieve the definition.
 ARGUMENT:: source
 A link::Classes/String:: containing inline Onda source, a code::.onda::/code::.on:: file path, or a code::.ondaproject:: manifest path.
 ARGUMENT:: fastMath
-Enable Onda's LLVM fast-math optimizations. Defaults to code::false::. Applies to inline source, source files, and projects. Fast math relaxes floating-point rules and can change numerical results.
+Enable Onda's LLVM fast-math optimizations. Defaults to code::false::, which uses Onda's default math mode. Applies to inline source, source files, and projects. Fast math relaxes floating-point rules and can change numerical results.
 
 code::
 OndaDef(\voice, "/path/to/voice.onda", fastMath: true).send;

@@ -949,7 +949,7 @@ bool ondaCompileStage2Impl(World* world, void* inUserData) {
         return true;
     }
     onda_compile_options_t compileOptions{};
-    compileOptions.fast_math = cmdData->fastMath;
+    compileOptions.math_mode = cmdData->fastMath ? ONDA_FLOAT_MATH_FAST : ONDA_FLOAT_MATH_DEFAULT;
     compileOptions.sample_rate = static_cast<float>(world->mSampleRate);
     compileOptions.block_size = world->mBufLength;
 

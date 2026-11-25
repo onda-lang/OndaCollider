@@ -91,12 +91,12 @@ server.waitForBoot {
             server.sync;
             fastMathSynth = Synth(\ondaFastMathTest, [\resultBus, fastMathBus.index]);
             0.1.wait;
-            assertClose.(readBus.(fastMathBus), 0.0, "default compilation should preserve floating-point rounding");
+            assertClose.(readBus.(fastMathBus), 0.0, "default compilation should preserve division rounding");
 
             fastMathDef = compile.(\fastMath, fixtures +/+ "fast_math.onda", true);
             assert.(fastMathDef.fastMath, "the definition should retain its fast-math setting");
             0.1.wait;
-            assertClose.(readBus.(fastMathBus), 1.0, "fast math should enable reassociation in the server compiler");
+            assertClose.(readBus.(fastMathBus), 1.0, "fast math should enable reciprocal multiplication in the server compiler");
 
             fastMathDef = compile.(\fastMath, File.readAllString(fixtures +/+ "fast_math.onda"), false);
             0.1.wait;

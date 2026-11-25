@@ -1,5 +1,6 @@
 <h1>
-  <img src="assets/svg/onda-logo-dark-circle.svg" alt="onda logo" width="40" align="absmiddle" /> OndaCollider
+  <a href="assets/svg/onda-logo-circle.svg#gh-light-mode-only"><img src="assets/svg/onda-logo-circle.svg" alt="onda logo" width="40" align="absmiddle" /></a>
+  <a href="assets/svg/onda-logo-dark-circle.svg#gh-dark-mode-only"><img src="assets/svg/onda-logo-dark-circle.svg" alt="onda logo" width="40" align="absmiddle" /></a> OndaCollider
 </h1>
 
 SuperCollider plugin to run the [Onda](https://github.com/onda-lang/onda) audio programming language in `scsynth`/`supernova`.
